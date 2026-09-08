@@ -4330,7 +4330,7 @@ export class ChatGptBrowserWorker {
         throw new Error("Prepared ChatGPT multipart prompt has an invalid transport part count");
       }
       const multipartStages = prepared.multipart && multipartTransactionId && multipartPartCount
-        ? prepared.multipart.parts.slice(0, -1).map((payload, index) => formatChatGptWebMultipartStage(
+        ? prepared.multipart.parts.map((payload, index) => formatChatGptWebMultipartStage(
           payload,
           multipartTransactionId,
           index + 1,

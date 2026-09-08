@@ -58,6 +58,11 @@ test("large Bigger Context uses smaller transport stages with a staging mode tha
 
   const compiled = compileChatGptWebPrompt(parsed, plus, undefined, { experimentalMultipartParts: parts });
   const messages = compiledChatGptWebMessages(compiled);
+  expect(messages).toHaveLength(parts! + 1);
+  expect(compiled.multipart!.parts.flatMap(part => JSON.parse(part).records)).toHaveLength(48);
+  const finalMessage = messages.at(-1)!;
+  expect(finalMessage.length).toBeLessThan(50_000);
+  expect(finalMessage).not.toContain("large-history-47-");
   const stageTokens = messages.slice(0, -1).map(text => estimateTokens(text, parsed.modelId));
   const stageChars = messages.slice(0, -1).map(text => text.length);
   const estimatedInputTokens = estimateCompiledChatGptWebInputTokens(compiled, parsed.modelId);
@@ -134,7 +139,7 @@ test("multipart planning leaves room for final attachments and execution instruc
     expect(() => assertChatGptWebMultipartInputWithinLimits(
       estimateCompiledChatGptWebInputTokens(compiled, parsed.modelId), Math.max(...tokens),
       parsed.modelId, "high", caps, Math.max(...chars), 3,
-      { stagingEffort: stage.effort, maxStageMessageTokens, maxStageChars, finalMessageTokens: tokens[2]!, finalMessageChars: chars[2]!, finalImageTokens: estimateChatGptWebImageTokens(compiled) },
+      { stagingEffort: stage.effort, maxStageMessageTokens, maxStageChars, finalMessageTokens: tokens.at(-1)!, finalMessageChars: chars.at(-1)!, finalImageTokens: estimateChatGptWebImageTokens(compiled) },
     )).not.toThrow();
   }
 }, 30_000);

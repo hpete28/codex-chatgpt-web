@@ -2981,7 +2981,7 @@ test("Bigger Context fits mixed-density whole records within both token and comp
     expect(compiled.trimmedCompactionMessages).toBeUndefined();
 
     const transaction = "ctx_0123456789abcdef0123456789abcdef";
-    const stages = multipart.parts.slice(0, -1).map((payload, index) => (
+    const stages = multipart.parts.map((payload, index) => (
       formatChatGptWebMultipartStage(payload, transaction, index + 1, 3).text
     ));
     const final = formatChatGptWebMultipartCommit(multipart, transaction);

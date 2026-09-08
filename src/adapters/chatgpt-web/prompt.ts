@@ -123,21 +123,14 @@ export function formatChatGptWebMultipartCommit(
   const manifest = multipart.parts.map((payload, index) => (
     `${index + 1}/${totalParts}:${createHash("sha256").update(payload).digest("hex")}`
   )).join(" ");
-  const acknowledgedParts = totalParts - 1;
-  const finalPayload = multipart.parts[totalParts - 1]!;
   return [
     "<codex_multipart_commit>",
     `transaction_id: ${transactionId}`,
     `parts: ${totalParts}`,
     `manifest: ${manifest}`,
-    `acknowledged_parts: ${acknowledgedParts}/${totalParts}`,
-    `The first ${acknowledgedParts} context part${acknowledgedParts === 1 ? " was" : "s were"} acknowledged. The final part is included in this same message and starts the task.`,
+    `acknowledged_parts: ${totalParts}/${totalParts}`,
+    `All ${totalParts} context parts were acknowledged. This small commit starts the task without retransmitting context data.`,
     "</codex_multipart_commit>",
-    "<codex_context_part_json>",
-    "```json",
-    finalPayload,
-    "```",
-    "</codex_context_part_json>",
     "<codex_multipart_execute>",
     `All ${totalParts} context parts are now present. Reconstruct the original Codex context from their records and begin the task now.`,
     "Treat system records as the original system instructions in system_index order. Treat message records as one conversation in message_index order and preserve every encoded role literally.",
@@ -617,34 +610,52 @@ export function compileChatGptWebPrompt(
       };
       const imageTokens = images.reduce((sum, image) => sum + chatGptWebImageTokenReserve(image.detail), 0);
       const transactionId = `ctx_${"0".repeat(32)}`;
+      // Every context part is now acknowledged before execution. This keeps the final High/Pro
+      // commit small and deterministic instead of making it carry the last (and often largest)
+      // context payload. The original 2/3-part transport keeps its widest measured staging mode;
+      // additional transport-only parts use the smallest account-visible one-message envelope.
+      const stagingEffort = multipartParts > CHATGPT_BIGGER_CONTEXT_PARTS
+        ? "low"
+        : capabilities.proAvailable ? "max" : "medium";
+      const stagingLimits = resolveChatGptWebTransportLimits(
+        CHATGPT_WEB_MODEL_ID, stagingEffort, capabilities,
+      );
+      const stagingTokenLimit = resolveChatGptWebMessageTokenBudget(
+        CHATGPT_WEB_MODEL_ID, stagingEffort, capabilities,
+      );
       const budgets = multipart.parts.map((payload, index) => {
-        const final = index === multipart.parts.length - 1;
-        // The original 2/3-part transport keeps its measured widest staging mode. Additional
-        // transport-only parts exist specifically to keep inert acknowledgements inside the
-        // cheapest account-visible mode; they do not expand the 3x total context ceiling.
-        const effort = final
-          ? mode.effort
-          : multipartParts > CHATGPT_BIGGER_CONTEXT_PARTS
-            ? "low"
-            : capabilities.proAvailable ? "max" : "medium";
-        const limits = resolveChatGptWebTransportLimits(CHATGPT_WEB_MODEL_ID, effort, capabilities);
-        const tokenLimit = resolveChatGptWebMessageTokenBudget(
-          CHATGPT_WEB_MODEL_ID, effort, capabilities, final ? imageTokens : 0,
-        );
-        const fixedMessage = final
-          ? formatChatGptWebMultipartCommit(multipart, transactionId)
-          : formatChatGptWebMultipartStage(payload, transactionId, index + 1, multipartParts!).text;
-        const tokens = tokenLimit - estimateTokens(fixedMessage);
-        const chars = (limits.browserComposerCharLimit ?? Infinity) - fixedMessage.length;
+        const fixedMessage = formatChatGptWebMultipartStage(
+          payload, transactionId, index + 1, multipartParts!,
+        ).text;
+        const tokens = stagingTokenLimit - estimateTokens(fixedMessage);
+        const chars = (stagingLimits.browserComposerCharLimit ?? Infinity) - fixedMessage.length;
         if (tokens <= 0 || chars <= 0) {
           throw new ChatGptWebAdapterError(
-            `The Bigger Context ${final ? "final part's instructions and attachments" : "stage wrapper"} exceed the available message budget before any task history is added. Reduce those inputs before retrying.`,
+            "The Bigger Context stage wrapper exceeds the available message budget before any task history is added. Reduce those inputs before retrying.",
             { status: 400, errorType: "invalid_request_error", code: "context_length_exceeded", retryable: false },
           );
         }
         return { tokens, chars };
       });
       multipart.parts = partitionMultipartContext(records, multipartParts!, budgets);
+
+      const finalMessage = formatChatGptWebMultipartCommit(multipart, transactionId);
+      const finalLimits = resolveChatGptWebTransportLimits(
+        CHATGPT_WEB_MODEL_ID, mode.effort, capabilities,
+      );
+      const finalTokenLimit = resolveChatGptWebMessageTokenBudget(
+        CHATGPT_WEB_MODEL_ID, mode.effort, capabilities, imageTokens,
+      );
+      if (
+        estimateTokens(finalMessage) > finalTokenLimit
+        || (finalLimits.browserComposerCharLimit !== undefined
+          && finalMessage.length > finalLimits.browserComposerCharLimit)
+      ) {
+        throw new ChatGptWebAdapterError(
+          "The Bigger Context final execution instructions and attachments exceed the available message budget even after all context parts were staged. Reduce those inputs before retrying.",
+          { status: 400, errorType: "invalid_request_error", code: "context_length_exceeded", retryable: false },
+        );
+      }
       return { text: multipart.commit, images, multipart };
     }
     const envelopeJson = withoutRetiredTurnHandles(JSON.stringify({ version: 3, system, messages }));

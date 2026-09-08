@@ -96,7 +96,7 @@ test("read-only prompts resume without exposing a bind capability", () => {
   expect(compiled.text).not.toContain("CODEX_INTERNAL_CONTEXT_COMPACT");
 });
 
-test("Bigger Context sends three semantic record envelopes and starts work from the final part", () => {
+test("Bigger Context stages every semantic record envelope before a small execution commit", () => {
   const token = "turn_12345678901234567890123456789012";
   const parsed = request("high");
   parsed.context.systemPrompt = ["system-one", "system-two"];
@@ -130,10 +130,10 @@ test("Bigger Context sends three semantic record envelopes and starts work from 
   expect(compiled.text).not.toContain("<codex_context_json>");
 
   const transactionId = `ctx_${"a".repeat(32)}`;
-  const stages = compiled.multipart!.parts.slice(0, -1).map((part, index) => (
+  const stages = compiled.multipart!.parts.map((part, index) => (
     formatChatGptWebMultipartStage(part, transactionId, index + 1)
   ));
-  expect(stages).toHaveLength(2);
+  expect(stages).toHaveLength(3);
   for (const [index, stage] of stages.entries()) {
     expect(stage.text).toContain(`part: ${index + 1}/3`);
     expect(stage.text).toContain(stage.sha256);
@@ -149,10 +149,10 @@ test("Bigger Context sends three semantic record envelopes and starts work from 
   }
   const commit = formatChatGptWebMultipartCommit(compiled.multipart!, transactionId);
   expect(commit).toContain(`transaction_id: ${transactionId}`);
-  expect(commit).toContain("acknowledged_parts: 2/3");
-  expect(commit).toContain("The final part is included in this same message and starts the task");
-  expect(commit).toContain(compiled.multipart!.parts[2]!);
-  expect(commit).toContain("latest-request");
+  expect(commit).toContain("acknowledged_parts: 3/3");
+  expect(commit).toContain("This small commit starts the task without retransmitting context data");
+  expect(commit).not.toContain(compiled.multipart!.parts[2]!);
+  expect(commit).not.toContain("latest-request");
   expect(commit.match(new RegExp(token, "g"))).toHaveLength(1);
 });
 
@@ -171,15 +171,16 @@ test("Bigger Context uses the minimum transport and reserves three stages for co
   );
   expect(compiled.multipart?.parts).toHaveLength(2);
   const transactionId = `ctx_${"b".repeat(32)}`;
-  const stages = compiled.multipart!.parts.slice(0, -1).map((part, index) => (
+  const stages = compiled.multipart!.parts.map((part, index) => (
     formatChatGptWebMultipartStage(part, transactionId, index + 1, 2)
   ));
-  expect(stages).toHaveLength(1);
+  expect(stages).toHaveLength(2);
   expect(stages.map(stage => stage.acknowledgement)).toEqual([
     `CODEX_MULTIPART_ACK ${transactionId} 1/2 ${stages[0]!.sha256}`,
+    `CODEX_MULTIPART_ACK ${transactionId} 2/2 ${stages[1]!.sha256}`,
   ]);
   expect(formatChatGptWebMultipartCommit(compiled.multipart!, transactionId))
-    .toContain("acknowledged_parts: 1/2");
+    .toContain("acknowledged_parts: 2/2");
 });
 
 test("browser-only Medium directs users to the full harness", () => {
