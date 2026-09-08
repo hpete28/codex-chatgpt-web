@@ -6,6 +6,7 @@ import { namespacedToolName, type CodexTool } from "../../types";
 import { VERSION } from "../../version";
 import type { ChatGptTurnEnvironment } from "./environment";
 import { CODEX_COMPACTION_CONTROL_WIRE_NAME } from "./native-compaction-control";
+import { CODEX_WORK_STATE_WIRE_NAME, parseWorkState } from "./work-state";
 import { callTurnBroker, TurnBrokerTimeoutError, type BrokerToolResult } from "./turn-broker";
 
 interface ClaimedTurn {
@@ -866,6 +867,14 @@ export async function runChatGptMcpServer(options: {
         return result({ submitted: true });
       }
       return withClaimedTurn("codex_tool_call", requestId, extra, async claimed => {
+        if (contract === "native" && wire_name === CODEX_WORK_STATE_WIRE_NAME) {
+          if (input !== undefined) throw new Error("Work state control does not accept freeform input");
+          return asMcpResult(await callTurnBroker<BrokerToolResult>(options.brokerSocketPath, {
+            method: "work_state",
+            bindingId: claimed.bindingId,
+            arguments: { ...parseWorkState(args) },
+          }, 5_000, extra.signal));
+        }
         const bound = claimed.environment;
         const tool = safeVisibleTools(bound, contract)
           .find(candidate => wireName(candidate) === wire_name);

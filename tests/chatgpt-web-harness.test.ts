@@ -454,6 +454,103 @@ describe("ChatGPT outer-native harness v4", () => {
     }
   });
 
+  test.each(["continue", "complete", "blocked", "missing", "cancel", "compaction", "initial-error", "uncertain-send", "missing-retained"])(
+    "retained work continuation: %s", async scenario => {
+    const socketPath = brokerTestEndpoint(`cgw-work-state-${scenario}-${process.pid}-${Date.now()}`);
+    const provider: CodexProviderConfig = {
+      adapter: "chatgpt-web", baseUrl: `browser://work-state-${scenario}-${Date.now()}`,
+      chatgptWeb: { browserHost: "launcher", browserHostDescriptorPath: join(tempRoot, "work-launcher.json"),
+        brokerSocketPath: socketPath, localToolsEnabled: true, solAvailable: true, experimentalBiggerContext: true },
+    };
+    const broker = TurnBroker.forSocket(socketPath);
+    const worker = ChatGptBrowserWorker.forProvider(provider);
+    const originalRun = worker.run.bind(worker);
+    const request = rawWireRequest(environmentXml);
+    const adapter = createChatGptWebAdapter(provider);
+    const turns: BrowserTurn[] = [];
+    const prompts: string[] = [];
+    let originalSubmissions = 0;
+    let cancelledAtBoundary = false;
+    const client = new Client({ name: "work-continuation-test", version: "1.0.0" });
+    const transport = new StdioClientTransport({ command: process.execPath,
+      args: ["src/cli.ts", "mcp", "--broker-socket", socketPath], cwd: process.cwd(), stderr: "pipe" });
+    (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = async turn => {
+      turns.push(turn);
+      const index = turns.length;
+      if (index === 2 && scenario === "missing-retained") {
+        // The launcher refused reuse before any follow-up was prepared or submitted.
+        throw new Error("exact retained conversation is unavailable");
+      }
+      const prepared = index === 1 ? await turn.prepare() : await turn.prepareResume!();
+      prompts.push(prepared.text);
+      const token = prepared.text.match(/turn_token (turn_[A-Za-z0-9_-]+)/)?.[1];
+      expect(token).toBeDefined();
+      if (index === 1) {
+        turn.onSendActivated?.();
+        turn.onSubmitted?.();
+        originalSubmissions += 1;
+      } else {
+        expect(turn.requireRetainedConversation).toBeTrue();
+        expect(turn.conversationKey).toBe(turns[0]!.conversationKey);
+        expect(turn.traceId).toBe(turns[0]!.traceId);
+        expect(prepared.text).not.toContain(environmentXml);
+        expect(prepared.text).not.toContain("Inspect the project");
+        expect(turn.onSendActivated).toBeUndefined();
+        await expect(turn.prepare()).rejects.toThrow("exact retained");
+      }
+      if (scenario !== "missing") {
+        const status = index === 2 || scenario === "complete" ? "complete"
+          : scenario === "blocked" ? "blocked" : "continue";
+        const recorded = await client.callTool({ name: "codex_tool_call", arguments: {
+          turn_token: token, wire_name: "codex.control.work_state",
+          arguments: { status, remaining: status === "complete" ? "" : "Verify required checks", progress: `Verified milestone ${index}` },
+        } });
+        expect(recorded.isError).not.toBeTrue();
+      }
+      if (index === 2 && scenario === "uncertain-send") throw new Error("follow-up Send activated but acceptance is uncertain");
+      if (scenario === "initial-error") throw new Error("original submitted response failed before completion");
+      if (scenario === "compaction") broker.requestCompaction(token!, { content: [] });
+      const answer = index === 1 ? "First response." : "Required checks finished.";
+      turn.onTextDelta(answer);
+      const revision = await turn.completionFence!.begin();
+      expect(revision).toBeNumber();
+      expect(await turn.completionFence!.commit(revision!)).toBeTrue();
+      if (scenario === "cancel") {
+        // Native cancellation at the clean boundary, before any subsequent Web message.
+        const cancellation = chatGptTurnSessions.cancelNativeTurn("thread_test_123", "turn_test_123",
+          new ChatGptWebAdapterError("Cancelled by native Codex", { status: 499, errorType: "client_closed_request",
+            code: "client_cancelled", retryable: false }));
+        cancelledAtBoundary = cancellation.cancelled === 1;
+      }
+      return answer;
+    };
+    try {
+      await client.connect(transport);
+      const events: AdapterEvent[] = [];
+      await adapter.runTurn!(request, { headers: new Headers() }, event => events.push(event));
+      const continuing = ["continue", "uncertain-send", "missing-retained"].includes(scenario);
+      expect(turns).toHaveLength(continuing ? 2 : 1);
+      expect(originalSubmissions).toBe(1);
+      if (["cancel", "initial-error", "uncertain-send", "missing-retained"].includes(scenario)) {
+        expect(events.at(-1)).toMatchObject({ type: "error", retryable: false });
+        if (scenario === "cancel") expect(cancelledAtBoundary).toBeTrue();
+      } else {
+        expect(events.at(-1)).toMatchObject({ type: "done", stopReason: "stop", endTurn: true });
+        const answer = events.filter((event): event is Extract<AdapterEvent, { type: "text_delta" }> => event.type === "text_delta" && event.phase === "final_answer")
+          .map(event => event.text).join("");
+        expect(answer).toBe(scenario === "continue" ? "First response.\n\nRequired checks finished." : "First response.");
+      }
+      // Re-observing an accepted native request replays its journal, never a browser submission.
+      if (scenario !== "cancel") await adapter.runTurn!(request, { headers: new Headers() }, () => {});
+      expect(turns).toHaveLength(continuing ? 2 : 1);
+    } finally {
+      (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = originalRun;
+      await client.close();
+      chatGptTurnSessions.clear();
+      await broker.close();
+    }
+  }, 15_000);
+
   test("closing a browser trace terminates the active adapter turn and blocks tab resurrection", async () => {
     const socketPath = brokerTestEndpoint(`cgw-close-trace-${process.pid}-${Date.now()}`);
     const provider: CodexProviderConfig = {

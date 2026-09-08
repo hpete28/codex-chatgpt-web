@@ -21,7 +21,8 @@ import { namespacedToolName, type AdapterEvent, type CodexContentPart, type Code
 import type { ProviderAdapter } from "../base";
 import { parseDataUrl } from "../image";
 import { ChatGptWebAdapterError } from "./adapter-error";
-import { ChatGptBrowserWorker } from "./browser-worker";
+import { ChatGptBrowserWorker, type BrowserTurn } from "./browser-worker";
+import { workContinuationPrompt } from "./work-state";
 import { extractChatGptTurnEnvironment, extractChatGptTurnIdentity, priorChatGptAbortedTurnIds } from "./environment";
 import { CHATGPT_WEB_LUNA_MODEL_ID, resolveChatGptWebModelMode, type ChatGptWebCapabilities } from "./model";
 import { chatGptReadOnlyContextWarning, compileChatGptWebPrompt } from "./prompt";
@@ -422,6 +423,8 @@ export function createChatGptWebAdapter(
       ? retainedConversationResumeRequest(checkpointInput.parsed)
       : undefined;
     const retainConversation = conversationKey !== undefined;
+    const workContinuation = retainConversation && !manualRequest && !parsed.options.outputFormat
+      && broker.enableWorkContinuation !== undefined && broker.continueCompletedTurn !== undefined;
     const releaseRetainedConversation = conversationKey && retainedLauncherDescriptor
       ? async () => {
         await releaseLauncherRetainedConversation(retainedLauncherDescriptor, conversationKey);
@@ -434,6 +437,7 @@ export function createChatGptWebAdapter(
         : undefined;
       return {
         captureLunaCheckpoint,
+        ...(workContinuation ? { workContinuation: true } : {}),
         ...(experimentalMultipartParts !== undefined
           ? { experimentalMultipartParts }
           : {}),
@@ -719,6 +723,7 @@ export function createChatGptWebAdapter(
       );
       activeToken = turnToken;
       try {
+        if (workContinuation) await broker.enableWorkContinuation!(turnToken);
         const compiled = compileChatGptWebPrompt(
           input,
           turnCapabilities,
@@ -739,7 +744,7 @@ export function createChatGptWebAdapter(
         throw error;
       }
     };
-    const browserTurn = cancellableBrowserTurn(trackBrowserOwner(finalizeCheckpoint(worker.run({
+    const initialBrowserTurn: BrowserTurn = {
       traceId,
       modelId: parsed.modelId,
       reasoning: parsed.options.reasoning,
@@ -763,7 +768,51 @@ export function createChatGptWebAdapter(
         captureLunaCheckpoint: true,
         onLunaCheckpoint: captureCheckpoint,
       } : {}),
-    }))), browserAbort);
+    };
+    const runBrowserMessages = async (): Promise<string> => {
+      let nextTurn = initialBrowserTurn;
+      let answer = "";
+      for (;;) {
+        const segment = await worker.run(nextTurn);
+        answer += (answer && segment ? "\n\n" : "") + segment;
+        if (browserAbort.signal.aborted) throw browserAbort.signal.reason ?? new DOMException("ChatGPT web turn aborted", "AbortError");
+        const continuation = workContinuation && activeToken
+          ? await broker.continueCompletedTurn!(activeToken)
+          : undefined;
+        if (!continuation) return answer;
+        // worker.run includes physical browser settlement and the launcher retain acknowledgement.
+        // Never fall back to a fresh chat or recompile/replay the accepted native request.
+        const prepareContinuation = async () => {
+          if (browserAbort.signal.aborted) throw browserAbort.signal.reason ?? new DOMException("ChatGPT web turn aborted", "AbortError");
+          return { text: workContinuationPrompt(continuation.turnToken, continuation.state), images: [], release: () => {} };
+        };
+        let firstDelta = true;
+        trace.push({ kind: "commentary", text: "The Web response ended with required work recorded as remaining. Continuing in the retained conversation." });
+        nextTurn = {
+          traceId,
+          modelId: parsed.modelId,
+          reasoning: parsed.options.reasoning,
+          capabilities: turnCapabilities,
+          conversationKey,
+          retainConversation: true,
+          requireRetainedConversation: true,
+          prepare: async () => { throw new Error("Work continuation requires its exact retained conversation"); },
+          prepareResume: prepareContinuation,
+          abortSignal: browserAbort.signal,
+          externalProgress,
+          completionFence: initialBrowserTurn.completionFence,
+          onReasoningSummary: initialBrowserTurn.onReasoningSummary,
+          onCommentary: initialBrowserTurn.onCommentary,
+          onTextDelta: delta => {
+            if (!delta) return;
+            if (firstDelta && text.value()) text.push("\n\n");
+            firstDelta = false;
+            text.push(delta);
+          },
+        };
+      }
+    };
+    const browserTurn = cancellableBrowserTurn(trackBrowserOwner(finalizeCheckpoint(runBrowserMessages())), browserAbort);
     void browserTurn.browser.catch(error => {
       if (!tokenSettled) {
         tokenSettled = true;

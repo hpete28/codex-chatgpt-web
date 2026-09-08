@@ -8,6 +8,7 @@ import {
   type CompactionTransactionHandle,
 } from "./compaction-transaction";
 import type { ChatGptTurnEnvironment } from "./environment";
+import { parseWorkState, type ChatGptWorkState } from "./work-state";
 
 interface PendingTurn extends ChatGptTurnEnvironment {
   expiresAt?: number;
@@ -82,6 +83,8 @@ interface TurnChannel {
   activityRevision: number;
   completionCommitted: boolean;
   completionRevision?: number;
+  /** The native owner stays stable; each retained Web message gets a fresh capability. */
+  continuation?: { browserToken: string; state?: ChatGptWorkState; previousProgress?: string };
   retirementWaiters: Set<SafeWaiter<void>>;
   batchTimer?: ReturnType<typeof setTimeout>;
 }
@@ -111,6 +114,7 @@ interface BrokerRequest {
     | "safe_start"
     | "safe_complete"
     | "activity_complete"
+    | "work_state"
     | "submit_compaction_handoff";
   token?: string;
   bindingId?: string;
@@ -207,6 +211,9 @@ function assertSurfaceNonce(value: unknown): asserts value is string {
 }
 
 export interface TurnBrokerOwner {
+  enableWorkContinuation?(token: string): void | Promise<void>;
+  continueCompletedTurn?(token: string): { turnToken: string; state: ChatGptWorkState } | undefined
+    | Promise<{ turnToken: string; state: ChatGptWorkState } | undefined>;
   register(environment: ChatGptTurnEnvironment, ttlMs?: number, traceId?: string): Promise<string>;
   registerSafe(
     environment: ChatGptTurnEnvironment,
@@ -239,6 +246,7 @@ export interface TurnBrokerOwner {
 const MAX_UNIX_SOCKET_PATH_BYTES = 103;
 
 export class TurnBroker implements TurnBrokerOwner {
+  private readonly browserTokenOwners = new Map<string, string>();
   static forSocket(path: string): TurnBroker {
     let broker = brokers.get(path);
     if (!broker) {
@@ -442,6 +450,45 @@ export class TurnBroker implements TurnBrokerOwner {
     return channel.activityRevision;
   }
 
+  enableWorkContinuation(token: string): void {
+    const channel = this.channels.get(token);
+    if (!channel || channel.safe || channel.completionCommitted) throw new Error("Work continuation owner is unavailable");
+    channel.continuation ??= { browserToken: token };
+  }
+
+  /** Called only after worker.run has settled, including the launcher's exact retained release. */
+  continueCompletedTurn(token: string): { turnToken: string; state: ChatGptWorkState } | undefined {
+    this.prune();
+    const channel = this.channels.get(token);
+    if (!channel) throw new Error("Work continuation owner was retired");
+    const control = channel.continuation;
+    if (!control || control.state?.status !== "continue" || channel.compactionRequested) return undefined;
+    if (!channel.completionCommitted || channel.completionRevision !== channel.activityRevision
+      || channel.activities.size || channel.invocations.size) {
+      throw new Error("Work continuation requires a committed, quiescent completion fence");
+    }
+    if (control.previousProgress === control.state.progress) {
+      throw new Error("Work continuation stopped: no new recorded progress since the previous Web boundary");
+    }
+    const state = control.state;
+    control.previousProgress = state.progress;
+    delete control.state;
+    this.browserTokenOwners.delete(control.browserToken);
+    this.retire(this.retiredTokens, control.browserToken, channel.traceId);
+    if (channel.bindingId) {
+      this.bindings.delete(channel.bindingId);
+      this.retire(this.retiredBindings, channel.bindingId, channel.traceId);
+      delete channel.bindingId;
+    }
+    control.browserToken = opaqueId("turn");
+    this.browserTokenOwners.set(control.browserToken, token);
+    channel.completionCommitted = false;
+    delete channel.completionRevision;
+    // Invalidate any delayed fence commit from the previous browser message.
+    channel.activityRevision += 1;
+    return { turnToken: control.browserToken, state };
+  }
+
   commitCompletionFence(token: string, revision: number): boolean {
     this.prune();
     if (!Number.isSafeInteger(revision) || revision < 0) {
@@ -603,8 +650,13 @@ export class TurnBroker implements TurnBrokerOwner {
   }
 
   revoke(token: string, reason = new Error("Codex turn binding was revoked")): void {
+    token = this.browserTokenOwners.get(token) ?? token;
     const channel = this.channels.get(token);
     if (!channel) return;
+    if (channel.continuation) {
+      this.browserTokenOwners.delete(channel.continuation.browserToken);
+      this.retire(this.retiredTokens, channel.continuation.browserToken, channel.traceId);
+    }
     this.channels.delete(token);
     this.pending.delete(token);
     if (channel.bindingId) {
@@ -877,7 +929,7 @@ export class TurnBroker implements TurnBrokerOwner {
     if (!request || typeof request !== "object" || typeof request.id !== "string" || request.id.length === 0 || request.id.length > 256) {
       throw new Error("turn broker request id is invalid");
     }
-    if (!["claim", "resolve", "release", "invoke", "owner_status", "owner_register", "owner_register_safe", "owner_update", "owner_safe_sent", "owner_next", "owner_complete", "owner_completion_fence_begin", "owner_completion_fence_commit", "owner_wait_retirement", "owner_revoke", "owner_safe_wait_start", "owner_safe_wait_completion", "owner_request_compaction", "owner_compaction_delivery_count", "safe_start", "safe_complete", "activity_complete", "submit_compaction_handoff"].includes(request.method)) {
+    if (!["claim", "resolve", "release", "invoke", "owner_status", "owner_register", "owner_register_safe", "owner_update", "owner_safe_sent", "owner_next", "owner_complete", "owner_completion_fence_begin", "owner_completion_fence_commit", "owner_wait_retirement", "owner_revoke", "owner_safe_wait_start", "owner_safe_wait_completion", "owner_request_compaction", "owner_compaction_delivery_count", "safe_start", "safe_complete", "activity_complete", "work_state", "submit_compaction_handoff"].includes(request.method)) {
       throw new Error("turn broker method is invalid");
     }
   }
@@ -1004,8 +1056,10 @@ export class TurnBroker implements TurnBrokerOwner {
       if (typeof token !== "string" || token.length === 0) {
         throw new Error(contract === "safe" ? "request id is required" : "turn token is required");
       }
-      const channel = this.channels.get(token);
-      let activeChannel = channel && !channel.completionCommitted ? channel : undefined;
+      const ownerToken = this.browserTokenOwners.get(token) ?? token;
+      const channel = this.channels.get(ownerToken);
+      let activeChannel = channel && !channel.completionCommitted
+        && (!channel.continuation || channel.continuation.browserToken === token) ? channel : undefined;
       const retiredTurn = channel?.completionCommitted ? channel.traceId : this.retiredTokens.get(token);
       console.error(
         `[chatgpt-web] broker claim received (tokenChars=${token.length}, tokenHash=${handleFingerprint(token)}, valid=${Boolean(activeChannel)}`
@@ -1047,15 +1101,15 @@ export class TurnBroker implements TurnBrokerOwner {
       }
       if (activeChannel.bindingId) {
         const existing = this.bindings.get(activeChannel.bindingId);
-        if (!existing || existing.token !== token || existing.channel !== activeChannel) {
+        if (!existing || existing.token !== ownerToken || existing.channel !== activeChannel) {
           throw new Error("turn token binding state is inconsistent");
         }
         return { bindingId: activeChannel.bindingId, activityId, environment: activeChannel.environment };
       }
-      this.pending.delete(token);
+      this.pending.delete(ownerToken);
       const bindingId = opaqueId("binding");
       activeChannel.bindingId = bindingId;
-      this.bindings.set(bindingId, { token, channel: activeChannel });
+      this.bindings.set(bindingId, { token: ownerToken, channel: activeChannel });
       return { bindingId, activityId, environment: activeChannel.environment };
     }
 
@@ -1066,8 +1120,8 @@ export class TurnBroker implements TurnBrokerOwner {
       if (typeof request.activityId !== "string" || !/^activity_[A-Za-z0-9_-]{16,128}$/.test(request.activityId)) {
         throw new Error("turn activity id is invalid");
       }
-      const channel = this.channels.get(token);
-      if (!channel) {
+      const channel = this.channels.get(this.browserTokenOwners.get(token) ?? token);
+      if (!channel || (channel.continuation && channel.continuation.browserToken !== token)) {
         return { completed: false, retired: this.retiredTokens.has(token) };
       }
       if (channel.completedActivities.has(request.activityId)) {
@@ -1101,6 +1155,7 @@ export class TurnBroker implements TurnBrokerOwner {
       return { released: true };
     }
     if (request.method === "resolve") return { environment: binding.channel.environment };
+    if (binding.channel.completionCommitted) throw new Error("Web capability has already finished");
     this.assertSafeHarnessRunning(binding.channel);
     if (binding.channel.compactionRequested) {
       const result = binding.channel.compactionResult;
@@ -1110,6 +1165,17 @@ export class TurnBroker implements TurnBrokerOwner {
         `[chatgpt-web] broker trace=${binding.channel.traceId} intercepted a post-compaction MCP call`,
       );
       return structuredClone(result);
+    }
+
+    if (request.method === "work_state") {
+      const control = binding.channel.continuation;
+      if (!control) throw new Error("Work continuation is not enabled for this browser owner");
+      if (binding.channel.activities.size !== 1 || binding.channel.invocations.size > 0) {
+        throw new Error("Record work state serially after all other tool results have settled");
+      }
+      control.state = parseWorkState(request.arguments);
+      binding.channel.activityRevision += 1;
+      return { content: [{ type: "text", text: "Work state recorded. Continue authorized work, or end normally after all tool results settle." }] };
     }
 
     const wireName = request.wireName?.trim();
