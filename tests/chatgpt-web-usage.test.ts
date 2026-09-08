@@ -43,6 +43,51 @@ test("multipart selection accounts for whole-record and composer fit before subm
   }
 }, 30_000);
 
+test("large Bigger Context uses smaller Instant-capable transport stages without expanding its 3x ceiling", () => {
+  const plus = { ...capabilities, proAvailable: false };
+  const parsed = request("");
+  parsed.context.messages = Array.from({ length: 48 }, (_unused, index) => ({
+    role: "user" as const,
+    content: `large-history-${index}-${"word ".repeat(5_000)}`,
+    timestamp: index + 1,
+  }));
+
+  const parts = resolveBiggerContextMultipartParts(parsed, plus);
+  expect(parts).toBeDefined();
+  expect(parts!).toBeGreaterThan(3);
+
+  const compiled = compileChatGptWebPrompt(parsed, plus, undefined, { experimentalMultipartParts: parts });
+  const messages = compiledChatGptWebMessages(compiled);
+  const stageTokens = messages.slice(0, -1).map(text => estimateTokens(text, parsed.modelId));
+  const stageChars = messages.slice(0, -1).map(text => text.length);
+  const stagingMode = resolveChatGptWebMultipartStagingMode(
+    parsed.modelId,
+    plus,
+    Math.max(...stageTokens),
+    Math.max(...stageChars),
+  );
+
+  expect(stagingMode.effort).toBe("low");
+  expect(estimateCompiledChatGptWebInputTokens(compiled, parsed.modelId)).toBeLessThan(90_000 * 3);
+
+  expect(() => assertChatGptWebMultipartInputWithinLimits(
+    270_000,
+    1_000,
+    parsed.modelId,
+    "high",
+    plus,
+    1_000,
+    8,
+    {
+      stagingEffort: "low",
+      maxStageMessageTokens: 1_000,
+      maxStageChars: 1_000,
+      finalMessageTokens: 1_000,
+      finalMessageChars: 1_000,
+    },
+  )).toThrow("three-part ceiling");
+}, 30_000);
+
 test("Bigger Context compaction selects three parts before the legacy inline byte budget", () => {
   const parsed = request("x".repeat(160_000));
   parsed._compactionRequest = true;

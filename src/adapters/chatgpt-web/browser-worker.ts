@@ -38,8 +38,10 @@ import {
   CHATGPT_MAX_INPUT_IMAGES,
   formatChatGptWebMultipartCommit,
   formatChatGptWebMultipartStage,
+  isChatGptWebMultipartPartCount,
   type CompiledChatGptWebPrompt,
   type ChatGptWebPromptImage,
+  type ChatGptWebMultipartPartCount,
   type ChatGptWebMultipartStage,
 } from "./prompt";
 import { estimateCompiledChatGptWebInputTokens } from "./input-tokens";
@@ -69,6 +71,7 @@ import {
   notifyLauncherTurn,
 } from "../../launcher-browser-host";
 import {
+  CHATGPT_WEB_BIGGER_CONTEXT_MULTIPLIER,
   resolveChatGptWebContextLimits,
   resolveChatGptWebMessageTokenBudget,
   resolveChatGptWebTransportLimits,
@@ -878,7 +881,7 @@ export function assertChatGptWebMultipartInputWithinLimits(
   effort: ChatGptWebModelMode["effort"],
   capabilities: ChatGptWebCapabilities,
   maxMessageChars: number,
-  partCount: 2 | 3,
+  partCount: ChatGptWebMultipartPartCount,
   transport?: {
     stagingEffort: ChatGptWebModelMode["effort"];
     maxStageMessageTokens: number;
@@ -951,11 +954,12 @@ export function assertChatGptWebMultipartInputWithinLimits(
   } else {
     assertMessageBoundary("stage", estimatedMessageTokens, maxMessageChars, effort);
   }
-  const experimentalContextWindow = baseContextWindow * partCount;
+  const semanticPartCount = Math.min(partCount, CHATGPT_WEB_BIGGER_CONTEXT_MULTIPLIER);
+  const experimentalContextWindow = baseContextWindow * semanticPartCount;
   if (estimatedInputTokens < experimentalContextWindow) return;
-  const partLabel = partCount === 2 ? "two-part" : "three-part";
+  const partLabel = semanticPartCount === 2 ? "two-part" : "three-part";
   throw new ChatGptWebAdapterError(
-    `This Bigger Context transaction is estimated at ${estimatedInputTokens.toLocaleString("en-US")} input tokens, which exceeds its experimental ${experimentalContextWindow.toLocaleString("en-US")}-token ${partLabel} ceiling. Run /compact, then retry.`,
+    `This Bigger Context transaction is estimated at ${estimatedInputTokens.toLocaleString("en-US")} input tokens, which exceeds its experimental ${experimentalContextWindow.toLocaleString("en-US")}-token ${partLabel} ceiling. Transport part count (${partCount}) does not expand that context window. Run /compact, then retry.`,
     { status: 400, errorType: "invalid_request_error", code: "context_length_exceeded", retryable: false },
   );
 }
@@ -4302,12 +4306,16 @@ export class ChatGptBrowserWorker {
       const multipartTransactionId = prepared.multipart
         ? `ctx_${randomUUID().replaceAll("-", "")}`
         : undefined;
-      const multipartStages = prepared.multipart && multipartTransactionId
+      const multipartPartCount = prepared.multipart?.parts.length;
+      if (multipartPartCount !== undefined && !isChatGptWebMultipartPartCount(multipartPartCount)) {
+        throw new Error("Prepared ChatGPT multipart prompt has an invalid transport part count");
+      }
+      const multipartStages = prepared.multipart && multipartTransactionId && multipartPartCount
         ? prepared.multipart.parts.slice(0, -1).map((payload, index) => formatChatGptWebMultipartStage(
           payload,
           multipartTransactionId,
           index + 1,
-          prepared.multipart!.parts.length,
+          multipartPartCount,
         ))
         : undefined;
       const multipartFinalPrompt = prepared.multipart && multipartTransactionId
@@ -4338,7 +4346,7 @@ export class ChatGptBrowserWorker {
           requestedMode.effort,
           browserCapabilities,
           maxMessageChars,
-          prepared.multipart.parts.length,
+          multipartPartCount!,
           multipartStages
             && multipartFinalPrompt
             && maxStageMessageTokens !== undefined

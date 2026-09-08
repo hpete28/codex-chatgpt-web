@@ -3,6 +3,8 @@ import { estimateTokens } from "../../lib/token-estimate";
 import {
   formatChatGptWebMultipartCommit,
   formatChatGptWebMultipartStage,
+  isChatGptWebMultipartPartCount,
+  type ChatGptWebMultipartPartCount,
   type CompiledChatGptWebPrompt,
 } from "./prompt";
 
@@ -15,15 +17,24 @@ export const CHATGPT_LUNA_BROWSER_INPUT_TOKEN_BUDGET = 28_000;
 
 const TOKEN_ESTIMATE_TRANSACTION = `ctx_${"0".repeat(32)}`;
 
+function compiledMultipartPartCount(compiled: CompiledChatGptWebPrompt): ChatGptWebMultipartPartCount {
+  const partCount = compiled.multipart?.parts.length;
+  if (partCount === undefined || !isChatGptWebMultipartPartCount(partCount)) {
+    throw new Error("Compiled ChatGPT multipart prompt has an invalid transport part count");
+  }
+  return partCount;
+}
+
 export function compiledChatGptWebMessages(compiled: CompiledChatGptWebPrompt): string[] {
   if (!compiled.multipart) return [compiled.text];
+  const partCount = compiledMultipartPartCount(compiled);
   return [
     ...compiled.multipart.parts.slice(0, -1).map((payload, index) => (
       formatChatGptWebMultipartStage(
         payload,
         TOKEN_ESTIMATE_TRANSACTION,
         index + 1,
-        compiled.multipart!.parts.length,
+        partCount,
       ).text
     )),
     formatChatGptWebMultipartCommit(compiled.multipart, TOKEN_ESTIMATE_TRANSACTION),
@@ -55,7 +66,7 @@ export function estimateCompiledChatGptWebInputTokens(
         payload,
         TOKEN_ESTIMATE_TRANSACTION,
         index + 1,
-        compiled.multipart!.parts.length,
+        compiledMultipartPartCount(compiled),
       ).acknowledgement,
       modelId,
     ), 0)
