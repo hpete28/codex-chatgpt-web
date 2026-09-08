@@ -43,7 +43,7 @@ test("multipart selection accounts for whole-record and composer fit before subm
   }
 }, 30_000);
 
-test("large Bigger Context uses smaller Instant-capable transport stages without expanding its 3x ceiling", () => {
+test("large Bigger Context uses smaller transport stages with a staging mode that can retain the full accumulated context", () => {
   const plus = { ...capabilities, proAvailable: false };
   const parsed = request("");
   parsed.context.messages = Array.from({ length: 48 }, (_unused, index) => ({
@@ -60,15 +60,17 @@ test("large Bigger Context uses smaller Instant-capable transport stages without
   const messages = compiledChatGptWebMessages(compiled);
   const stageTokens = messages.slice(0, -1).map(text => estimateTokens(text, parsed.modelId));
   const stageChars = messages.slice(0, -1).map(text => text.length);
+  const estimatedInputTokens = estimateCompiledChatGptWebInputTokens(compiled, parsed.modelId);
   const stagingMode = resolveChatGptWebMultipartStagingMode(
     parsed.modelId,
     plus,
     Math.max(...stageTokens),
     Math.max(...stageChars),
+    estimatedInputTokens,
   );
 
-  expect(stagingMode.effort).toBe("low");
-  expect(estimateCompiledChatGptWebInputTokens(compiled, parsed.modelId)).toBeLessThan(90_000 * 3);
+  expect(stagingMode.effort).toBe("medium");
+  expect(estimatedInputTokens).toBeLessThan(90_000 * 3);
 
   expect(() => assertChatGptWebMultipartInputWithinLimits(
     270_000,

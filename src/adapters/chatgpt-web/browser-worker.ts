@@ -770,7 +770,17 @@ const chatGptTerminalErrorAlert = (scope: ChatGptTextScope): Locator => scope
   .getByText(/Something went wrong[\s\S]*help\.openai\.com/i)
   .last();
 
+const chatGptMessageTooLongAlert = (scope: ChatGptTextScope): Locator => scope
+  .getByText(/message.{0,80}too long/i)
+  .last();
+
 export async function throwIfChatGptTerminalErrorAlert(scope: ChatGptTextScope): Promise<void> {
+  if (await chatGptMessageTooLongAlert(scope).isVisible().catch(() => false)) {
+    throw new ChatGptWebAdapterError(
+      "ChatGPT rejected the submitted message because the accumulated conversation is too large.",
+      { status: 400, errorType: "invalid_request_error", code: "context_length_exceeded", retryable: false },
+    );
+  }
   if (await scope.getByTestId("regenerate-thread-error-button").last().isVisible().catch(() => false)) {
     throw new ChatGptWebAdapterError(
       "ChatGPT displayed an error for this response. Check the ChatGPT tab for the exact error, then retry the turn.",
@@ -964,12 +974,13 @@ export function assertChatGptWebMultipartInputWithinLimits(
   );
 }
 
-/** Select the cheapest account-visible mode that can carry every inert multipart stage. */
+/** Select the cheapest account-visible mode that can carry each inert stage and the accumulated multipart context. */
 export function resolveChatGptWebMultipartStagingMode(
   modelId: string,
   capabilities: ChatGptWebCapabilities,
   maxStageMessageTokens: number,
   maxStageChars: number,
+  estimatedConversationTokens = maxStageMessageTokens,
 ): ChatGptWebModelMode {
   if (modelId === CHATGPT_WEB_LUNA_MODEL_ID || !capabilities.solAvailable) {
     throw new ChatGptWebAdapterError(
@@ -987,13 +998,21 @@ export function resolveChatGptWebMultipartStagingMode(
     const mode = resolveChatGptWebModelMode(modelId, effort, capabilities);
     const limits = resolveChatGptWebTransportLimits(modelId, effort, capabilities);
     const messageTokenLimit = resolveChatGptWebMessageTokenBudget(modelId, effort, capabilities);
+    // Multipart staging exists only under Bigger Context. Evaluate the accumulated conversation
+    // against that expanded context window even when a unit-test capability object omits the flag.
+    const contextWindow = resolveChatGptWebContextLimits(
+      modelId,
+      effort,
+      { ...capabilities, experimentalBiggerContext: true },
+    ).contextWindow;
     const tokenFits = maxStageMessageTokens <= messageTokenLimit;
     const charsFit = limits.browserComposerCharLimit === undefined
       || maxStageChars <= limits.browserComposerCharLimit;
-    if (tokenFits && charsFit) return mode;
+    const accumulatedContextFits = estimatedConversationTokens < contextWindow;
+    if (tokenFits && charsFit && accumulatedContextFits) return mode;
   }
   throw new ChatGptWebAdapterError(
-    `No ChatGPT effort available to this account can carry a Bigger Context stage with ${maxStageMessageTokens.toLocaleString("en-US")} estimated tokens and ${maxStageChars.toLocaleString("en-US")} characters.`,
+    `No ChatGPT effort available to this account can carry a Bigger Context stage with ${maxStageMessageTokens.toLocaleString("en-US")} estimated tokens and ${maxStageChars.toLocaleString("en-US")} characters while retaining ${estimatedConversationTokens.toLocaleString("en-US")} estimated accumulated context tokens.`,
     { status: 400, errorType: "invalid_request_error", code: "context_length_exceeded", retryable: false },
   );
 }
@@ -4336,6 +4355,7 @@ export class ChatGptBrowserWorker {
           browserCapabilities,
           maxStageMessageTokens!,
           maxStageChars!,
+          estimatedInputTokens,
         )
         : requestedMode;
       if (prepared.multipart) {
