@@ -159,7 +159,19 @@ export function unattributedChatGptEnvironmentMessages(
   return messages.length > 0 ? messages : undefined;
 }
 
+const NATIVE_CONTEXTUAL_USER_KINDS = new Set([
+  "plugins.recommendations",
+  "agents_md.instructions",
+  "environments.environment_context",
+]);
+
 function contextualUserMessage(value: Record<string, unknown>): boolean {
+  const metadata = record(value.internal_chat_message_metadata_passthrough);
+  const contentKinds = metadata?.content_item_kinds;
+  if (Array.isArray(contentKinds) && contentKinds.length > 0
+    && contentKinds.every(kind => typeof kind === "string" && NATIVE_CONTEXTUAL_USER_KINDS.has(kind))) {
+    return true;
+  }
   const text = rawMessageText(value).trim();
   return /^<environment_context>[\s\S]*<\/environment_context>$/.test(text)
     || /^<subagent_notification>[\s\S]*<\/subagent_notification>$/.test(text)
