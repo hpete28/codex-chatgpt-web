@@ -25,6 +25,7 @@ test("daemon streams browser lifecycle through the real helper process", async (
       if (prepared.multipart.parts.length !== 3) throw new Error("Multipart context was lost");
       await turn.onMultipartStageAcknowledged?.(1);
       await turn.onMultipartStageAcknowledged?.(2);
+      await turn.onMultipartStageAcknowledged?.(3);
       await turn.onSendActivated();
       turn.onSubmitted();
       turn.onReasoningSummary("Reading project");
@@ -111,7 +112,7 @@ test("daemon streams browser lifecycle through the real helper process", async (
     expect(deltas).toEqual(["done"]);
     expect(sendActivated).toBe(true);
     expect(submitted).toBe(true);
-    expect(acknowledgedStages).toEqual([1, 2]);
+    expect(acknowledgedStages).toEqual([1, 2, 3]);
     expect(checkpoints).toEqual([{
       answerHash: "a".repeat(64),
       checkpoint: {

@@ -492,7 +492,7 @@ export class LauncherBrowserHelperClient {
       else if (message.event === "multipart_stage_acknowledged") {
         const multipart = pending.prepared?.multipart;
         if (!multipart
-          || message.stageIndex >= multipart.parts.length
+          || message.stageIndex > multipart.parts.length
           || message.stageIndex !== (pending.acknowledgedMultipartStage ?? 0) + 1) {
           this.abortWithLocalFailure(
             message.id,
