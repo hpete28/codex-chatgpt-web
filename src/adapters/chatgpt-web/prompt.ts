@@ -44,10 +44,14 @@ export interface CompileChatGptWebPromptOptions {
 }
 
 export const CHATGPT_BIGGER_CONTEXT_PARTS = 3 as const;
-export type ChatGptWebMultipartPartCount = 2 | typeof CHATGPT_BIGGER_CONTEXT_PARTS;
-export type ChatGptWebMultipartParts =
-  | readonly [string, string]
-  | readonly [string, string, string];
+/** Transport can use more messages than the 3x context multiplier without increasing that ceiling. */
+export const CHATGPT_BIGGER_CONTEXT_MAX_TRANSPORT_PARTS = 8 as const;
+export type ChatGptWebMultipartPartCount = 2 | 3 | 4 | 5 | 6 | 7 | typeof CHATGPT_BIGGER_CONTEXT_MAX_TRANSPORT_PARTS;
+export type ChatGptWebMultipartParts = readonly string[];
+
+export function isChatGptWebMultipartPartCount(value: number): value is ChatGptWebMultipartPartCount {
+  return Number.isInteger(value) && value >= 2 && value <= CHATGPT_BIGGER_CONTEXT_MAX_TRANSPORT_PARTS;
+}
 
 export interface ChatGptWebMultipartPrompt {
   parts: ChatGptWebMultipartParts;
@@ -79,7 +83,7 @@ export function formatChatGptWebMultipartStage(
     !Number.isInteger(partIndex)
     || partIndex < 1
     || partIndex > totalParts
-    || (totalParts !== 2 && totalParts !== CHATGPT_BIGGER_CONTEXT_PARTS)
+    || !isChatGptWebMultipartPartCount(totalParts)
   ) {
     throw new Error("ChatGPT multipart stage index is invalid");
   }
@@ -115,27 +119,20 @@ export function formatChatGptWebMultipartCommit(
 ): string {
   assertMultipartTransactionId(transactionId);
   const totalParts = multipart.parts.length;
-  if (totalParts !== 2 && totalParts !== CHATGPT_BIGGER_CONTEXT_PARTS) {
-    throw new Error("ChatGPT multipart commit requires two or three staged parts");
+  if (!isChatGptWebMultipartPartCount(totalParts)) {
+    throw new Error("ChatGPT multipart commit has an invalid transport part count");
   }
   const manifest = multipart.parts.map((payload, index) => (
     `${index + 1}/${totalParts}:${createHash("sha256").update(payload).digest("hex")}`
   )).join(" ");
-  const acknowledgedParts = totalParts - 1;
-  const finalPayload = multipart.parts[totalParts - 1]!;
   return [
     "<codex_multipart_commit>",
     `transaction_id: ${transactionId}`,
     `parts: ${totalParts}`,
     `manifest: ${manifest}`,
-    `acknowledged_parts: ${acknowledgedParts}/${totalParts}`,
-    `The first ${acknowledgedParts} context part${acknowledgedParts === 1 ? " was" : "s were"} acknowledged. The final part is included in this same message and starts the task.`,
+    `acknowledged_parts: ${totalParts}/${totalParts}`,
+    `All ${totalParts} context parts were acknowledged. This small commit starts the task without retransmitting context data.`,
     "</codex_multipart_commit>",
-    "<codex_context_part_json>",
-    "```json",
-    finalPayload,
-    "```",
-    "</codex_context_part_json>",
     "<codex_multipart_execute>",
     `All ${totalParts} context parts are now present. Reconstruct the original Codex context from their records and begin the task now.`,
     "Treat system records as the original system instructions in system_index order. Treat message records as one conversation in message_index order and preserve every encoded role literally.",
@@ -396,8 +393,7 @@ function partitionMultipartContext(
     total_parts: totalParts,
     records: group,
   })));
-  if (totalParts === 2) return [payloads[0]!, payloads[1]!];
-  return [payloads[0]!, payloads[1]!, payloads[2]!];
+  return payloads;
 }
 
 export function chatGptReadOnlyContextWarning(
@@ -442,8 +438,8 @@ export function compileChatGptWebPrompt(
       throw new Error("ChatGPT Zero Risk does not support rolling or multipart browser transport");
     }
   }
-  if (multipartParts !== undefined && multipartParts !== 2 && multipartParts !== CHATGPT_BIGGER_CONTEXT_PARTS) {
-    throw new Error("Bigger Context requires two or three multipart stages");
+  if (multipartParts !== undefined && !isChatGptWebMultipartPartCount(multipartParts)) {
+    throw new Error("Bigger Context transport part count is invalid");
   }
   if (multipartEnabled && parsed.modelId === CHATGPT_WEB_LUNA_MODEL_ID) {
     throw new Error("Bigger Context is unavailable for Luna because its accumulated browser transcript still shares one 28,000-token transport budget");
@@ -604,9 +600,7 @@ export function compileChatGptWebPrompt(
         version: 1, part_index: index + 1, total_parts: multipartParts, records: [],
       });
       const multipart: ChatGptWebMultipartPrompt = {
-        parts: multipartParts === 2
-          ? [emptyPart(0), emptyPart(1)]
-          : [emptyPart(0), emptyPart(1), emptyPart(2)],
+        parts: Array.from({ length: multipartParts }, (_unused, index) => emptyPart(index)),
         commit: [
           ...sharedContract,
           ...transportContract,
@@ -619,27 +613,52 @@ export function compileChatGptWebPrompt(
       };
       const imageTokens = images.reduce((sum, image) => sum + chatGptWebImageTokenReserve(image.detail), 0);
       const transactionId = `ctx_${"0".repeat(32)}`;
+      // Every context part is now acknowledged before execution. This keeps the final High/Pro
+      // commit small and deterministic instead of making it carry the last (and often largest)
+      // context payload. The original 2/3-part transport keeps its widest measured staging mode;
+      // additional transport-only parts use the smallest account-visible one-message envelope.
+      const stagingEffort = multipartParts > CHATGPT_BIGGER_CONTEXT_PARTS
+        ? "low"
+        : capabilities.proAvailable ? "max" : "medium";
+      const stagingLimits = resolveChatGptWebTransportLimits(
+        CHATGPT_WEB_MODEL_ID, stagingEffort, capabilities,
+      );
+      const stagingTokenLimit = resolveChatGptWebMessageTokenBudget(
+        CHATGPT_WEB_MODEL_ID, stagingEffort, capabilities,
+      );
       const budgets = multipart.parts.map((payload, index) => {
-        const final = index === multipart.parts.length - 1;
-        const effort = final ? mode.effort : capabilities.proAvailable ? "max" : "medium";
-        const limits = resolveChatGptWebTransportLimits(CHATGPT_WEB_MODEL_ID, effort, capabilities);
-        const tokenLimit = resolveChatGptWebMessageTokenBudget(
-          CHATGPT_WEB_MODEL_ID, effort, capabilities, final ? imageTokens : 0,
-        );
-        const fixedMessage = final
-          ? formatChatGptWebMultipartCommit(multipart, transactionId)
-          : formatChatGptWebMultipartStage(payload, transactionId, index + 1, multipartParts!).text;
-        const tokens = tokenLimit - estimateTokens(fixedMessage);
-        const chars = (limits.browserComposerCharLimit ?? Infinity) - fixedMessage.length;
+        const fixedMessage = formatChatGptWebMultipartStage(
+          payload, transactionId, index + 1, multipartParts!,
+        ).text;
+        const tokens = stagingTokenLimit - estimateTokens(fixedMessage);
+        const chars = (stagingLimits.browserComposerCharLimit ?? Infinity) - fixedMessage.length;
         if (tokens <= 0 || chars <= 0) {
           throw new ChatGptWebAdapterError(
-            `The Bigger Context ${final ? "final part's instructions and attachments" : "stage wrapper"} exceed the available message budget before any task history is added. Reduce those inputs before retrying.`,
+            "The Bigger Context stage wrapper exceeds the available message budget before any task history is added. Reduce those inputs before retrying.",
             { status: 400, errorType: "invalid_request_error", code: "context_length_exceeded", retryable: false },
           );
         }
         return { tokens, chars };
       });
       multipart.parts = partitionMultipartContext(records, multipartParts!, budgets);
+
+      const finalMessage = formatChatGptWebMultipartCommit(multipart, transactionId);
+      const finalLimits = resolveChatGptWebTransportLimits(
+        CHATGPT_WEB_MODEL_ID, mode.effort, capabilities,
+      );
+      const finalTokenLimit = resolveChatGptWebMessageTokenBudget(
+        CHATGPT_WEB_MODEL_ID, mode.effort, capabilities, imageTokens,
+      );
+      if (
+        estimateTokens(finalMessage) > finalTokenLimit
+        || (finalLimits.browserComposerCharLimit !== undefined
+          && finalMessage.length > finalLimits.browserComposerCharLimit)
+      ) {
+        throw new ChatGptWebAdapterError(
+          "The Bigger Context final execution instructions and attachments exceed the available message budget even after all context parts were staged. Reduce those inputs before retrying.",
+          { status: 400, errorType: "invalid_request_error", code: "context_length_exceeded", retryable: false },
+        );
+      }
       return { text: multipart.commit, images, multipart };
     }
     const envelopeJson = withoutRetiredTurnHandles(JSON.stringify({ version: 3, system, messages }));

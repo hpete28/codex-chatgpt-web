@@ -38,8 +38,10 @@ import {
   CHATGPT_MAX_INPUT_IMAGES,
   formatChatGptWebMultipartCommit,
   formatChatGptWebMultipartStage,
+  isChatGptWebMultipartPartCount,
   type CompiledChatGptWebPrompt,
   type ChatGptWebPromptImage,
+  type ChatGptWebMultipartPartCount,
   type ChatGptWebMultipartStage,
 } from "./prompt";
 import { estimateCompiledChatGptWebInputTokens } from "./input-tokens";
@@ -69,6 +71,7 @@ import {
   notifyLauncherTurn,
 } from "../../launcher-browser-host";
 import {
+  CHATGPT_WEB_BIGGER_CONTEXT_MULTIPLIER,
   resolveChatGptWebContextLimits,
   resolveChatGptWebMessageTokenBudget,
   resolveChatGptWebTransportLimits,
@@ -767,7 +770,17 @@ const chatGptTerminalErrorAlert = (scope: ChatGptTextScope): Locator => scope
   .getByText(/Something went wrong[\s\S]*help\.openai\.com/i)
   .last();
 
+const chatGptMessageTooLongAlert = (scope: ChatGptTextScope): Locator => scope
+  .getByText(/message.{0,80}too long/i)
+  .last();
+
 export async function throwIfChatGptTerminalErrorAlert(scope: ChatGptTextScope): Promise<void> {
+  if (await chatGptMessageTooLongAlert(scope).isVisible().catch(() => false)) {
+    throw new ChatGptWebAdapterError(
+      "ChatGPT rejected the submitted message because the accumulated conversation is too large.",
+      { status: 400, errorType: "invalid_request_error", code: "context_length_exceeded", retryable: false },
+    );
+  }
   if (await scope.getByTestId("regenerate-thread-error-button").last().isVisible().catch(() => false)) {
     throw new ChatGptWebAdapterError(
       "ChatGPT displayed an error for this response. Check the ChatGPT tab for the exact error, then retry the turn.",
@@ -878,7 +891,7 @@ export function assertChatGptWebMultipartInputWithinLimits(
   effort: ChatGptWebModelMode["effort"],
   capabilities: ChatGptWebCapabilities,
   maxMessageChars: number,
-  partCount: 2 | 3,
+  partCount: ChatGptWebMultipartPartCount,
   transport?: {
     stagingEffort: ChatGptWebModelMode["effort"];
     maxStageMessageTokens: number;
@@ -951,21 +964,23 @@ export function assertChatGptWebMultipartInputWithinLimits(
   } else {
     assertMessageBoundary("stage", estimatedMessageTokens, maxMessageChars, effort);
   }
-  const experimentalContextWindow = baseContextWindow * partCount;
+  const semanticPartCount = Math.min(partCount, CHATGPT_WEB_BIGGER_CONTEXT_MULTIPLIER);
+  const experimentalContextWindow = baseContextWindow * semanticPartCount;
   if (estimatedInputTokens < experimentalContextWindow) return;
-  const partLabel = partCount === 2 ? "two-part" : "three-part";
+  const partLabel = semanticPartCount === 2 ? "two-part" : "three-part";
   throw new ChatGptWebAdapterError(
-    `This Bigger Context transaction is estimated at ${estimatedInputTokens.toLocaleString("en-US")} input tokens, which exceeds its experimental ${experimentalContextWindow.toLocaleString("en-US")}-token ${partLabel} ceiling. Run /compact, then retry.`,
+    `This Bigger Context transaction is estimated at ${estimatedInputTokens.toLocaleString("en-US")} input tokens, which exceeds its experimental ${experimentalContextWindow.toLocaleString("en-US")}-token ${partLabel} ceiling. Transport part count (${partCount}) does not expand that context window. Run /compact, then retry.`,
     { status: 400, errorType: "invalid_request_error", code: "context_length_exceeded", retryable: false },
   );
 }
 
-/** Select the cheapest account-visible mode that can carry every inert multipart stage. */
+/** Select the cheapest account-visible mode that can carry each inert stage and the accumulated multipart context. */
 export function resolveChatGptWebMultipartStagingMode(
   modelId: string,
   capabilities: ChatGptWebCapabilities,
   maxStageMessageTokens: number,
   maxStageChars: number,
+  estimatedConversationTokens = maxStageMessageTokens,
 ): ChatGptWebModelMode {
   if (modelId === CHATGPT_WEB_LUNA_MODEL_ID || !capabilities.solAvailable) {
     throw new ChatGptWebAdapterError(
@@ -983,13 +998,21 @@ export function resolveChatGptWebMultipartStagingMode(
     const mode = resolveChatGptWebModelMode(modelId, effort, capabilities);
     const limits = resolveChatGptWebTransportLimits(modelId, effort, capabilities);
     const messageTokenLimit = resolveChatGptWebMessageTokenBudget(modelId, effort, capabilities);
+    // Multipart staging exists only under Bigger Context. Evaluate the accumulated conversation
+    // against that expanded context window even when a unit-test capability object omits the flag.
+    const contextWindow = resolveChatGptWebContextLimits(
+      modelId,
+      effort,
+      { ...capabilities, experimentalBiggerContext: true },
+    ).contextWindow;
     const tokenFits = maxStageMessageTokens <= messageTokenLimit;
     const charsFit = limits.browserComposerCharLimit === undefined
       || maxStageChars <= limits.browserComposerCharLimit;
-    if (tokenFits && charsFit) return mode;
+    const accumulatedContextFits = estimatedConversationTokens < contextWindow;
+    if (tokenFits && charsFit && accumulatedContextFits) return mode;
   }
   throw new ChatGptWebAdapterError(
-    `No ChatGPT effort available to this account can carry a Bigger Context stage with ${maxStageMessageTokens.toLocaleString("en-US")} estimated tokens and ${maxStageChars.toLocaleString("en-US")} characters.`,
+    `No ChatGPT effort available to this account can carry a Bigger Context stage with ${maxStageMessageTokens.toLocaleString("en-US")} estimated tokens and ${maxStageChars.toLocaleString("en-US")} characters while retaining ${estimatedConversationTokens.toLocaleString("en-US")} estimated accumulated context tokens.`,
     { status: 400, errorType: "invalid_request_error", code: "context_length_exceeded", retryable: false },
   );
 }
@@ -4349,12 +4372,16 @@ export class ChatGptBrowserWorker {
       const multipartTransactionId = prepared.multipart
         ? `ctx_${randomUUID().replaceAll("-", "")}`
         : undefined;
-      const multipartStages = prepared.multipart && multipartTransactionId
-        ? prepared.multipart.parts.slice(0, -1).map((payload, index) => formatChatGptWebMultipartStage(
+      const multipartPartCount = prepared.multipart?.parts.length;
+      if (multipartPartCount !== undefined && !isChatGptWebMultipartPartCount(multipartPartCount)) {
+        throw new Error("Prepared ChatGPT multipart prompt has an invalid transport part count");
+      }
+      const multipartStages = prepared.multipart && multipartTransactionId && multipartPartCount
+        ? prepared.multipart.parts.map((payload, index) => formatChatGptWebMultipartStage(
           payload,
           multipartTransactionId,
           index + 1,
-          prepared.multipart!.parts.length,
+          multipartPartCount,
         ))
         : undefined;
       const multipartFinalPrompt = prepared.multipart && multipartTransactionId
@@ -4375,6 +4402,7 @@ export class ChatGptBrowserWorker {
           browserCapabilities,
           maxStageMessageTokens!,
           maxStageChars!,
+          estimatedInputTokens,
         )
         : requestedMode;
       if (prepared.multipart) {
@@ -4385,7 +4413,7 @@ export class ChatGptBrowserWorker {
           requestedMode.effort,
           browserCapabilities,
           maxMessageChars,
-          prepared.multipart.parts.length,
+          multipartPartCount!,
           multipartStages
             && multipartFinalPrompt
             && maxStageMessageTokens !== undefined

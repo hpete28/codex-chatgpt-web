@@ -9,8 +9,10 @@ import {
 import type { CodexParsedRequest, CodexUsage } from "../../types";
 import { compiledChatGptWebMessages, estimateChatGptWebImageTokens, estimateCompiledChatGptWebInputTokens } from "./input-tokens";
 import {
+  CHATGPT_BIGGER_CONTEXT_MAX_TRANSPORT_PARTS,
   CHATGPT_BIGGER_CONTEXT_PARTS,
   compileChatGptWebPrompt,
+  isChatGptWebMultipartPartCount,
   type ChatGptWebMultipartPartCount,
   type CompiledChatGptWebPrompt,
   type CompileChatGptWebPromptOptions,
@@ -74,7 +76,6 @@ export function resolveBiggerContextMultipartParts(
     throw new Error("Bigger Context is unavailable for Luna because its accumulated browser transcript still shares one 28,000-token transport budget");
   }
   const mode = resolveChatGptWebModelMode(parsed.modelId, parsed.options.reasoning, capabilities);
-  if (parsed._compactionRequest) return CHATGPT_BIGGER_CONTEXT_PARTS;
   const { contextWindow, autoCompactTokenLimit } = resolveChatGptWebContextLimits(
     CHATGPT_WEB_BACKEND_MODEL,
     mode.effort,
@@ -84,16 +85,20 @@ export function resolveBiggerContextMultipartParts(
     parsed, capabilities, mode.localTools ? ESTIMATE_TURN_TOKEN : undefined,
     { experimentalMultipartParts: parts },
   );
-  const inline = compile();
-  const inputTokens = estimateCompiledChatGptWebInputTokens(inline, parsed.modelId);
-  const initialParts = biggerContextPartCount(inputTokens, autoCompactTokenLimit, false);
-  if (initialParts === CHATGPT_BIGGER_CONTEXT_PARTS) return initialParts;
+  const inline = parsed._compactionRequest ? undefined : compile();
+  const initialParts = parsed._compactionRequest
+    ? CHATGPT_BIGGER_CONTEXT_PARTS
+    : biggerContextPartCount(
+      estimateCompiledChatGptWebInputTokens(inline!, parsed.modelId),
+      autoCompactTokenLimit,
+      false,
+    );
 
-  const fits = (compiled: CompiledChatGptWebPrompt): boolean => {
+  const fits = (
+    compiled: CompiledChatGptWebPrompt,
+    stagingEffort: "low" | "medium" | "max",
+  ): boolean => {
     const messages = compiledChatGptWebMessages(compiled);
-    // Inert stages may use any explicitly available staging effort; execution keeps the chosen
-    // effort. These are the widest stage modes used by the browser's existing selector.
-    const stagingEffort = capabilities.proAvailable ? "max" : "medium";
     for (const [index, text] of messages.entries()) {
       const final = index === messages.length - 1;
       const effort = final ? mode.effort : stagingEffort;
@@ -104,10 +109,25 @@ export function resolveBiggerContextMultipartParts(
       );
       if (estimateTokens(text, parsed.modelId) > budget) return false;
     }
-    return estimateCompiledChatGptWebInputTokens(compiled, parsed.modelId) < contextWindow * messages.length;
+    // Extra transport messages only reduce per-message ingestion pressure. Bigger Context remains
+    // a fixed 3x context experiment regardless of how many inert acknowledgements carry it.
+    return estimateCompiledChatGptWebInputTokens(compiled, parsed.modelId)
+      < contextWindow * CHATGPT_BIGGER_CONTEXT_PARTS;
   };
-  if (initialParts === undefined && fits(inline)) return undefined;
-  return fits(compile(2)) ? 2 : CHATGPT_BIGGER_CONTEXT_PARTS;
+  const widestStagingEffort = capabilities.proAvailable ? "max" : "medium";
+  if (initialParts === undefined && fits(inline!, widestStagingEffort)) return undefined;
+  if (initialParts !== CHATGPT_BIGGER_CONTEXT_PARTS && fits(compile(2), widestStagingEffort)) return 2;
+
+  // Large 3x-tier transactions can place one inert Medium stage almost at its full message budget.
+  // Prefer the smallest transport-only split whose staging messages fit Instant. This keeps the
+  // acknowledgement path cheap and bounded while the final execution message retains the user's
+  // selected effort. If an atomic record cannot fit Instant, preserve the existing three-part path
+  // and let browser preflight report the measured boundary rather than silently dropping context.
+  for (let candidate = CHATGPT_BIGGER_CONTEXT_PARTS; candidate <= CHATGPT_BIGGER_CONTEXT_MAX_TRANSPORT_PARTS; candidate += 1) {
+    if (!isChatGptWebMultipartPartCount(candidate)) continue;
+    if (fits(compile(candidate), "low")) return candidate;
+  }
+  return CHATGPT_BIGGER_CONTEXT_PARTS;
 }
 
 export function biggerContextPartCount(

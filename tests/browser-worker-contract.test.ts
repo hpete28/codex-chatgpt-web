@@ -2631,6 +2631,18 @@ test("the known terminal ChatGPT error alert returns a structured retryable fail
   expect(fixture.pressed).toEqual([]);
 });
 
+test("a ChatGPT message-too-long response is a non-retryable context failure", async () => {
+  const fixture = dialogPage("Your message is too long. Please edit it and try again.", "Retry", true);
+  await expect(throwIfChatGptTerminalErrorAlert(fixture.page)).rejects.toMatchObject({
+    name: "ChatGptWebAdapterError",
+    status: 400,
+    errorType: "invalid_request_error",
+    code: "context_length_exceeded",
+    retryable: false,
+  });
+  expect(fixture.pressed).toEqual([]);
+});
+
 test("the current response error action identifies short and localized failures without clicking Retry", async () => {
   for (const text of [
     "An error occurred while generating the response.",
@@ -3099,7 +3111,7 @@ test("Bigger Context fits mixed-density whole records within both token and comp
     expect(compiled.trimmedCompactionMessages).toBeUndefined();
 
     const transaction = "ctx_0123456789abcdef0123456789abcdef";
-    const stages = multipart.parts.slice(0, -1).map((payload, index) => (
+    const stages = multipart.parts.map((payload, index) => (
       formatChatGptWebMultipartStage(payload, transaction, index + 1, 3).text
     ));
     const final = formatChatGptWebMultipartCommit(multipart, transaction);
@@ -3215,11 +3227,12 @@ test("Bigger Context preflight expands only the total context ceiling and keeps 
   )).toThrow("unavailable for Luna");
 });
 
-test("Bigger Context stages use the lowest account mode that can carry the stage", () => {
+test("Bigger Context stages use the lowest account mode that can carry the stage and accumulated context", () => {
   const plus = { localToolsEnabled: false, solAvailable: true, proAvailable: false };
   const pro = { localToolsEnabled: false, solAvailable: true, proAvailable: true };
-  expect(resolveChatGptWebMultipartStagingMode("gpt-5.6-sol", plus, 30_000, 200_000).effort).toBe("low");
-  expect(resolveChatGptWebMultipartStagingMode("gpt-5.6-sol", plus, 30_000, 300_000).effort).toBe("medium");
+  expect(resolveChatGptWebMultipartStagingMode("gpt-5.6-sol", plus, 30_000, 200_000, 120_000).effort).toBe("low");
+  expect(resolveChatGptWebMultipartStagingMode("gpt-5.6-sol", plus, 30_000, 200_000, 250_000).effort).toBe("medium");
+  expect(resolveChatGptWebMultipartStagingMode("gpt-5.6-sol", plus, 30_000, 300_000, 120_000).effort).toBe("medium");
   expect(resolveChatGptWebMultipartStagingMode("gpt-5.6-sol", plus, 80_000, 300_000).effort).toBe("medium");
   // The same text must have the same available input budget inline, staged or in the final part.
   // 80k is the early compaction trigger; the remaining input budget includes an 8192-token reserve.

@@ -256,6 +256,70 @@ test("v1 goal compaction authorizes the human instruction that native Codex reta
   expect(compacted.output).not.toContainEqual(expect.objectContaining({ id: goal.id }));
 });
 
+test("v2 compaction ignores native grouped preamble when authenticating reordered retained human instruction", async () => {
+  const config = defaultConfig("full");
+  const metadata = { thread_id: "thread_grouped_preamble", turn_id: "turn_grouped_preamble" };
+  const human = {
+    type: "message", role: "user", id: "msg_human_before_compaction",
+    content: [{ type: "input_text", text: "Continue the requested implementation" }],
+    internal_chat_message_metadata_passthrough: {
+      turn_id: "turn_human_before_compaction", content_item_kinds: ["user.text"],
+    },
+  };
+  const groupedPreamble = {
+    type: "message", role: "user", id: "msg_native_grouped_preamble",
+    content: [
+      { type: "input_text", text: "<recommended_plugins>Example plugin</recommended_plugins>" },
+      { type: "input_text", text: "# AGENTS.md instructions\n<INSTRUCTIONS>Keep existing changes.</INSTRUCTIONS>" },
+      { type: "input_text", text: "<environment_context><cwd>D:\\Projects\\example</cwd></environment_context>" },
+    ],
+    internal_chat_message_metadata_passthrough: {
+      turn_id: metadata.turn_id,
+      content_item_kinds: [
+        "plugins.recommendations",
+        "agents_md.instructions",
+        "environments.environment_context",
+      ],
+    },
+  };
+  const original = {
+    model, stream: true,
+    input: [human, groupedPreamble, { type: "compaction_trigger" }],
+    client_metadata: { "x-codex-turn-metadata": JSON.stringify(metadata) },
+  };
+  const compact = await responseRequest(new Request("http://127.0.0.1/v1/responses", {
+    method: "POST", body: JSON.stringify(original),
+  }), config, compactionAdapterFactory());
+  expect(compact.status).toBe(200);
+  const completed = (await compact.text()).split("\n")
+    .filter(line => line.startsWith("data: ") && line !== "data: [DONE]")
+    .map(line => JSON.parse(line.slice("data: ".length)) as { type?: string; response?: { output?: unknown[] } })
+    .find(event => event.type === "response.completed");
+  expect(completed?.response?.output).toHaveLength(1);
+  const compactedOutput = completed!.response!.output!;
+
+  // Native Codex rebuilds current contextual preamble before the retained human instruction.
+  // The human message is therefore the latest task revision after compaction even though the
+  // pre-compaction request ended with a current-turn user-role context bundle.
+  const response = await responseRequest(new Request("http://127.0.0.1/v1/responses", {
+    method: "POST",
+    body: JSON.stringify({
+      ...original,
+      stream: false,
+      input: [groupedPreamble, human, ...compactedOutput],
+    }),
+  }), config, () => ({
+    name: "grouped-preamble-continuation",
+    async runTurn(parsed, _incoming, emit) {
+      expect(extractChatGptTurnUserRevision(parsed)).toEqual(human.content);
+      emit({ type: "text_delta", text: "Continued", phase: "final_answer" });
+      emit({ type: "done", stopReason: "stop", endTurn: true });
+    },
+  }));
+  expect(response.status).toBe(200);
+  expect((await response.json() as { status: string }).status).toBe("completed");
+});
+
 test("v1 post-compaction continuation retains the producer's bounded source representation", async () => {
   const config = defaultConfig("full");
   const source = { type: "message", role: "user", content: [{ type: "input_text", text: "x".repeat(80_100) }],
