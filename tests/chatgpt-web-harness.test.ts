@@ -379,11 +379,12 @@ describe("ChatGPT outer-native harness v4", () => {
         brokerSocketPath: socketPath,
         localToolsEnabled: true,
         solAvailable: true,
-        proAvailable: true,
+        proAvailable: false,
         experimentalBiggerContext: true,
       },
     };
     const request = rawWireRequest(environmentXml);
+    request.options.reasoning = "low";
     request.context.tools = [
       ...tools,
       {
@@ -394,11 +395,11 @@ describe("ChatGPT outer-native harness v4", () => {
       },
     ];
     request.context.messages = [
-      { role: "user", content: `OLD_HISTORY_MARKER ${"a ".repeat(110_000)}`, timestamp: 1 },
+      { role: "user", content: `OLD_HISTORY_MARKER ${"z9Q$ ".repeat(10_000)}`, timestamp: 1 },
       { role: "assistant", content: [{ type: "text", text: "Prior completed response" }], timestamp: 2 },
       { role: "user", content: "Continue the latest unfinished work", timestamp: 3 },
     ];
-    const capabilities = { localToolsEnabled: true, solAvailable: true, proAvailable: true, experimentalBiggerContext: true };
+    const capabilities = { localToolsEnabled: true, solAvailable: true, proAvailable: false, experimentalBiggerContext: true };
     expect(resolveBiggerContextMultipartParts(request, capabilities)).toBeDefined();
 
     const worker = ChatGptBrowserWorker.forProvider(provider);
@@ -411,6 +412,8 @@ describe("ChatGPT outer-native harness v4", () => {
       expect(cold.text).toContain("mcp__codex_app__read_thread");
       expect(cold.text).toContain("turnLimit 10, includeOutputs false, and maxOutputCharsPerItem 20000");
       expect(cold.text).toContain("Make at most three read_thread calls total");
+      expect(cold.text).toContain("hasMore is false or nextCursor is null");
+      expect(cold.text).toContain("failed or interrupted turns");
       expect(cold.text).toContain("Continue the latest unfinished work");
       expect(cold.text).not.toContain("OLD_HISTORY_MARKER");
 
@@ -446,13 +449,14 @@ describe("ChatGPT outer-native harness v4", () => {
         brokerSocketPath: socketPath,
         localToolsEnabled: true,
         solAvailable: true,
-        proAvailable: true,
+        proAvailable: false,
         experimentalBiggerContext: true,
       },
     };
     const request = rawWireRequest(environmentXml);
+    request.options.reasoning = "low";
     request.context.messages = [
-      { role: "user", content: `FALLBACK_HISTORY_MARKER ${"a ".repeat(110_000)}`, timestamp: 1 },
+      { role: "user", content: `FALLBACK_HISTORY_MARKER ${"z9Q$ ".repeat(10_000)}`, timestamp: 1 },
       { role: "assistant", content: [{ type: "text", text: "Prior completed response" }], timestamp: 2 },
       { role: "user", content: "Continue the latest unfinished work", timestamp: 3 },
     ];
