@@ -28,6 +28,8 @@ const TEMPORARY_CHAT_URL = "https://chatgpt.com/?temporary-chat=true";
 const CHATGPT_ORIGIN = "https://chatgpt.com";
 const IDLE_BROWSER_URL = "data:text/html;charset=utf-8,%3C!doctype%20html%3E%3Chtml%3E%3Chead%3E%3Cmeta%20charset%3D%22utf-8%22%3E%3Ctitle%3ECodex%20Web%20GPT%3C%2Ftitle%3E%3C%2Fhead%3E%3Cbody%3E%3C%2Fbody%3E%3C%2Fhtml%3E#codex-web-gpt-browser-host";
 const PRIMARY_VIEW_BOOTSTRAP_TIMEOUT_MS = 10_000;
+const PRIMARY_VIEW_BOOTSTRAP_ATTEMPTS = 3;
+const PRIMARY_VIEW_BOOTSTRAP_RETRY_DELAY_MS = 250;
 const MAX_BROWSER_VIEW_DIMENSION = 16_384;
 const MAX_BROWSER_TABS = 5;
 const MAX_CANCELLED_TURN_TRACES = 256;
@@ -281,7 +283,9 @@ function loadCommittedBrowserSurface(
     };
     const onDestroyed = () => finish(new Error("Browser closed during idle document bootstrap"));
     const timeout = setTimeout(() => {
-      finish(new Error(`Browser idle document did not commit within ${timeoutMs}ms`));
+      const error = new Error(`Browser idle document did not commit within ${timeoutMs}ms`);
+      error.code = "browser_idle_document_timeout";
+      finish(error);
       if (!contents.isDestroyed()) contents.stop();
     }, timeoutMs);
     timeout.unref?.();
@@ -298,6 +302,39 @@ function loadCommittedBrowserSurface(
       finish(error instanceof Error ? error : new Error(String(error)));
     }
   });
+}
+
+async function loadPrimaryBrowserSurface(
+  contents,
+  logger,
+  {
+    attempts = PRIMARY_VIEW_BOOTSTRAP_ATTEMPTS,
+    timeoutMs = PRIMARY_VIEW_BOOTSTRAP_TIMEOUT_MS,
+    retryDelayMs = PRIMARY_VIEW_BOOTSTRAP_RETRY_DELAY_MS,
+  } = {},
+) {
+  if (!Number.isInteger(attempts) || attempts <= 0) {
+    throw new Error("Primary browser bootstrap attempts must be a positive integer");
+  }
+  if (!Number.isFinite(retryDelayMs) || retryDelayMs < 0) {
+    throw new Error("Primary browser bootstrap retry delay must be non-negative");
+  }
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      await loadCommittedBrowserSurface(contents, IDLE_BROWSER_URL, timeoutMs);
+      return;
+    } catch (error) {
+      const timedOut = error?.code === "browser_idle_document_timeout";
+      if (!timedOut || attempt === attempts || contents.isDestroyed()) throw error;
+      logger?.warn?.("browser.initialization_retry", {
+        attempt,
+        nextAttempt: attempt + 1,
+        maxAttempts: attempts,
+        reason: "idle_document_timeout",
+      });
+      if (retryDelayMs > 0) await sleep(retryDelayMs);
+    }
+  }
 }
 
 class BrowserHost {
@@ -432,7 +469,7 @@ class BrowserHost {
     this.view.setBounds(this.hiddenTurnBounds());
     this.view.setVisible(true);
     try {
-      await loadCommittedBrowserSurface(this.view.webContents, IDLE_BROWSER_URL);
+      await loadPrimaryBrowserSurface(this.view.webContents, this.logger);
       if (browserInteractionModeFor(this) === "automatic") await this.markOwnedSurface();
     } finally {
       this.syncViewVisibility();
@@ -2928,6 +2965,7 @@ module.exports = {
   isChatGptCloudflareChallengeResponse,
   isTemporaryChatUrl,
   loadCommittedBrowserSurface,
+  loadPrimaryBrowserSurface,
   MANUAL_SUBMIT_TIMEOUT_MS,
   MANUAL_COMPACTION_SUBMIT_TIMEOUT_MS,
   navigationErrorForLog,

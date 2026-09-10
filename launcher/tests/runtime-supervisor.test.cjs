@@ -10,6 +10,7 @@ const { packagedRuntimePaths } = require("../electron/runtime-command.cjs");
 const { linuxDesktopEntry, requireAutostartState } = require("../electron/autostart.cjs");
 const {
   MAX_RESTARTS_PER_WINDOW,
+  TUNNEL_START_TIMEOUT_MS,
   RuntimeSupervisor,
   managedTunnelConnectArgs,
   validateConfig,
@@ -803,6 +804,136 @@ test("launcher adopts a healthy native managed tunnel without spawning a foregro
     assert.equal((await supervisor.readLocalTunnelHealth()).ready, true);
   } finally {
     await health.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("non-zero tunnel connect can remain in the bounded readiness path while the runtime is starting", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-tunnel-connect-starting-"));
+  const events = [];
+  const supervisor = new RuntimeSupervisor({
+    app: { getVersion: () => "0.2.0", isPackaged: false },
+    logger: { info: (event) => events.push(event), warn() {}, error() {} },
+    sourceRoot: root,
+    coreHome: root,
+    browserDescriptorPath: path.join(root, "launcher.json"),
+  });
+  const config = { mode: "full", tunnel: { alias: "owned-test" } };
+  supervisor.assertTunnelClientReady = () => {};
+  supervisor.waitForKnownTunnelStatus = async () => ({ ready: false });
+  supervisor.runTunnelStopCommand = async () => ({ code: 1, output: "alias owned-test is not known" });
+  supervisor.runTunnelConnectCommand = async () => ({
+    code: 1,
+    stdout: JSON.stringify({ runtime_state: "starting", process_running: true, healthy: false, ready: false }),
+    stderr: "",
+    output: "synthetic non-zero starting result",
+  });
+  supervisor.waitForTunnel = async (_config, timeoutMs, operationName) => {
+    assert.equal(timeoutMs, TUNNEL_START_TIMEOUT_MS);
+    assert.equal(operationName, "runtime-start");
+    events.push("waitForTunnel");
+    supervisor.tunnel = { pid: 123_456_700, exitCode: null, signalCode: null, managed: true };
+    return { ready: true, pid: 123_456_700 };
+  };
+  supervisor.waitForTunnelMcpTransport = async () => { events.push("mcp"); };
+  supervisor.startTunnelMonitor = () => { events.push("monitor"); };
+  try {
+    await supervisor.startTunnel(config);
+    assert.deepEqual(events.slice(-4), ["runtime.tunnel_connect_starting", "waitForTunnel", "mcp", "monitor"]);
+    assert.equal(supervisor.tunnel?.pid, 123_456_700);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("non-zero tunnel connect still fails closed for terminal or malformed states", async () => {
+  for (const result of [
+    {
+      code: 1,
+      stdout: JSON.stringify({ runtime_state: "stopped", process_running: false, healthy: false, ready: false }),
+      stderr: "",
+      output: "terminal",
+    },
+    {
+      code: 1,
+      stdout: "not-json",
+      stderr: "authentication failed",
+      output: "authentication failed\nnot-json",
+    },
+    {
+      code: 1,
+      stdout: JSON.stringify({ runtime_state: "starting", process_running: true, error: "invalid configuration" }),
+      stderr: "",
+      output: "fatal starting result",
+    },
+  ]) {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-tunnel-connect-terminal-"));
+    const supervisor = new RuntimeSupervisor({
+      app: { getVersion: () => "0.2.0", isPackaged: false },
+      logger: { info() {}, warn() {}, error() {} },
+      sourceRoot: root,
+      coreHome: root,
+      browserDescriptorPath: path.join(root, "launcher.json"),
+    });
+    const config = { mode: "full", tunnel: { alias: "owned-test" } };
+    let stops = 0;
+    let waited = false;
+    supervisor.assertTunnelClientReady = () => {};
+    supervisor.waitForKnownTunnelStatus = async () => ({ ready: false });
+    supervisor.runTunnelStopCommand = async () => {
+      stops += 1;
+      return { code: 1, output: "alias owned-test is not known" };
+    };
+    supervisor.runTunnelConnectCommand = async () => result;
+    supervisor.waitForTunnel = async () => { waited = true; };
+    try {
+      await assert.rejects(supervisor.startTunnel(config), /tunnel runtime refused managed startup/);
+      assert.equal(waited, false);
+      assert.equal(stops, 2, "terminal connect failure should enter the existing startup cleanup path");
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("a transitional tunnel connect that never becomes ready keeps the bounded timeout and cleanup", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-tunnel-connect-timeout-"));
+  const supervisor = new RuntimeSupervisor({
+    app: { getVersion: () => "0.2.0", isPackaged: false },
+    logger: { info() {}, warn() {}, error() {} },
+    sourceRoot: root,
+    coreHome: root,
+    browserDescriptorPath: path.join(root, "launcher.json"),
+  });
+  const config = { mode: "full", tunnel: { alias: "owned-test" } };
+  let stops = 0;
+  let observedTimeout;
+  supervisor.assertTunnelClientReady = () => {};
+  supervisor.waitForKnownTunnelStatus = async () => ({ ready: false });
+  supervisor.runTunnelStopCommand = async () => {
+    stops += 1;
+    return { code: 1, output: "alias owned-test is not known" };
+  };
+  supervisor.runTunnelConnectCommand = async () => ({
+    code: 1,
+    stdout: JSON.stringify({ state: "starting", process_running: true, healthy: false, ready: false }),
+    stderr: "",
+    output: "synthetic non-zero starting result",
+  });
+  supervisor.waitForTunnel = async (_config, timeoutMs) => {
+    observedTimeout = timeoutMs;
+    supervisor.tunnel = { pid: 123_456_701, exitCode: null, signalCode: null, managed: true };
+    throw new Error(`Tunnel runtime did not become healthy and ready within ${timeoutMs}ms: state=starting`);
+  };
+  try {
+    await assert.rejects(
+      supervisor.startTunnel(config),
+      /Tunnel runtime did not become healthy and ready within 120000ms: state=starting/,
+    );
+    assert.equal(observedTimeout, TUNNEL_START_TIMEOUT_MS);
+    assert.equal(stops, 2, "timed out startup should run the existing cleanup once after pre-start cleanup");
+    assert.equal(supervisor.tunnel, null);
+  } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
 });

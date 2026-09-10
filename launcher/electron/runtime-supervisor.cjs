@@ -153,6 +153,20 @@ function tunnelControlDiagnostic(result) {
     .slice(0, 1_200);
 }
 
+function tunnelConnectStillStarting(result) {
+  if (typeof result?.stdout !== "string" || !result.stdout.trim()) return false;
+  try {
+    const parsed = JSON.parse(result.stdout);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return false;
+    const state = parsed.runtime_state ?? parsed.state ?? parsed.status;
+    if (state !== "starting" || parsed.process_running !== true || parsed.ready === true) return false;
+    return ![parsed.error, parsed.remote_error, parsed.stop_error]
+      .some(value => typeof value === "string" && value.trim());
+  } catch {
+    return false;
+  }
+}
+
 function tunnelCommandQuoted(value) {
   if (typeof value !== "string" || !value || /[\r\n]/.test(value)) {
     throw new Error("Tunnel MCP command values must be non-empty single-line strings");
@@ -995,10 +1009,19 @@ class RuntimeSupervisor {
       if (stopped.code === 0) await this.waitForTunnelStopped(config);
       this.tunnelHealthBaseUrl = null;
       const connected = await this.runTunnelConnectCommand(config);
-      if (connected.code !== 0) {
+      if (connected.code !== 0 && !tunnelConnectStillStarting(connected)) {
         throw new Error(
           `tunnel runtime refused managed startup: ${tunnelControlDiagnostic(connected)}`,
         );
+      }
+      if (connected.code !== 0) {
+        const detail = tunnelControlDiagnostic(connected);
+        this.logger.info("runtime.tunnel_connect_starting", { detail });
+        this.publishOperation?.({
+          name: operationName,
+          status: "running",
+          message: `Tunnel runtime is still starting: ${detail}`,
+        });
       }
       await this.waitForTunnel(config, TUNNEL_START_TIMEOUT_MS, operationName);
       if (!this.tunnel) throw new Error("Tunnel runtime became ready without a managed process identity");

@@ -19,6 +19,7 @@ const {
   isChatGptCloudflareChallengeResponse,
   isTemporaryChatUrl,
   loadCommittedBrowserSurface,
+  loadPrimaryBrowserSurface,
   MANUAL_COMPACTION_SUBMIT_TIMEOUT_MS,
   MANUAL_SUBMIT_TIMEOUT_MS,
   navigationErrorForLog,
@@ -131,6 +132,87 @@ test("primary browser bootstrap fails closed on navigation, renderer, and timeou
       /idle document did not commit within 5ms/,
     );
     assert.deepEqual(calls, ["stop"]);
+  } finally {
+    clearTimeout(keepTestAlive);
+  }
+});
+
+test("primary browser initialization retries one stalled idle commit and then succeeds", async () => {
+  const keepTestAlive = setTimeout(() => {}, 100);
+  try {
+    const calls = [];
+    const logs = [];
+    const contents = new EventEmitter();
+    let currentUrl = "about:blank";
+    let loads = 0;
+    contents.isDestroyed = () => false;
+    contents.getURL = () => currentUrl;
+    contents.stop = () => calls.push("stop");
+    contents.loadURL = async (url) => {
+      loads += 1;
+      calls.push(["load", url]);
+      if (loads === 1) return await new Promise(() => {});
+      currentUrl = url;
+    };
+
+    await loadPrimaryBrowserSurface(contents, {
+      warn: (event, detail) => logs.push([event, detail]),
+    }, { attempts: 2, timeoutMs: 5, retryDelayMs: 0 });
+
+    assert.deepEqual(calls, [
+      ["load", IDLE_BROWSER_URL],
+      "stop",
+      ["load", IDLE_BROWSER_URL],
+    ]);
+    assert.equal(currentUrl, IDLE_BROWSER_URL);
+    assert.deepEqual(logs, [["browser.initialization_retry", {
+      attempt: 1,
+      nextAttempt: 2,
+      maxAttempts: 2,
+      reason: "idle_document_timeout",
+    }]]);
+  } finally {
+    clearTimeout(keepTestAlive);
+  }
+});
+
+test("primary browser initialization does not retry terminal failures and bounds stalled retries", async () => {
+  const keepTestAlive = setTimeout(() => {}, 100);
+  try {
+    const failed = new EventEmitter();
+    let failedLoads = 0;
+    failed.isDestroyed = () => false;
+    failed.getURL = () => "about:blank";
+    failed.stop = () => {};
+    failed.loadURL = () => {
+      failedLoads += 1;
+      queueMicrotask(() => failed.emit(
+        "did-fail-load", {}, -2, "ERR_FAILED", IDLE_BROWSER_URL, true,
+      ));
+      return new Promise(() => {});
+    };
+    await assert.rejects(
+      loadPrimaryBrowserSurface(failed, null, { attempts: 3, timeoutMs: 50, retryDelayMs: 0 }),
+      /idle document failed: ERR_FAILED \(-2\)/,
+    );
+    assert.equal(failedLoads, 1);
+
+    const stalled = new EventEmitter();
+    let stalledLoads = 0;
+    let stops = 0;
+    stalled.isDestroyed = () => false;
+    stalled.getURL = () => "about:blank";
+    stalled.stop = () => { stops += 1; };
+    stalled.loadURL = () => {
+      stalledLoads += 1;
+      return new Promise(() => {});
+    };
+    await assert.rejects(
+      loadPrimaryBrowserSurface(stalled, null, { attempts: 2, timeoutMs: 5, retryDelayMs: 0 }),
+      /idle document did not commit within 5ms/,
+    );
+    assert.equal(stalledLoads, 2);
+    assert.equal(stops, 2);
   } finally {
     clearTimeout(keepTestAlive);
   }
