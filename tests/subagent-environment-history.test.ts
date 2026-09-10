@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
-import { homedir } from "node:os";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { ChatGptThreadEnvironmentStore } from "../src/adapters/chatgpt-web/thread-environment";
 import { chatGptTurnUserRevisionHistory, extractChatGptTurnEnvironment, extractChatGptTurnUserRevision } from "../src/adapters/chatgpt-web/environment";
@@ -66,6 +67,81 @@ test("fork-context child accepts its inherited parent visualization root", () =>
   ], parentThreadId);
 
   expect(store.resolve(child).cwd).toBe(root);
+});
+
+test("Compatibility V1 accepts only the canonical first-task retry after a High capacity failure", () => {
+  const nativeParentThreadId = "11111111-1111-4111-8111-111111111111";
+  const nativeChildThreadId = "22222222-2222-4222-8222-222222222222";
+  const failedTurnId = "33333333-3333-4333-8333-333333333333";
+  const retryTurnId = "44444444-4444-4444-8444-444444444444";
+  const codexHome = mkdtempSync(join(tmpdir(), "codex-v1-subagent-restart-"));
+  const rolloutDir = join(codexHome, "sessions", "2026", "09", "09");
+  const rolloutPath = join(rolloutDir, `rollout-2026-09-09T10-40-57-${nativeChildThreadId}.jsonl`);
+  const task = item("msg_child_task", "user", "Read package.json and return CHILD_OK <version>.", failedTurnId);
+  (task.internal_chat_message_metadata_passthrough as Record<string, unknown>).content_item_kinds = ["user.text"];
+  const currentEnvironment = item("msg_retry_environment", "user", environment, retryTurnId);
+  (currentEnvironment.internal_chat_message_metadata_passthrough as Record<string, unknown>).content_item_kinds = ["environments.environment_context"];
+  const records = (
+    errorInfo = "server_overloaded",
+    extraPreviousUser?: Record<string, unknown>,
+    previousModel = "chatgpt-web/high",
+    currentModel = "chatgpt-web/high",
+  ) => [
+    {
+      type: "session_meta",
+      payload: {
+        id: nativeChildThreadId,
+        parent_thread_id: nativeParentThreadId,
+        source: { subagent: { thread_spawn: { parent_thread_id: nativeParentThreadId, depth: 1, agent_path: null } } },
+        thread_source: "subagent",
+        multi_agent_version: "v1",
+      },
+    },
+    { type: "event_msg", payload: { type: "task_started", turn_id: failedTurnId } },
+    { type: "turn_context", payload: { turn_id: failedTurnId, model: previousModel, multi_agent_version: "v1" } },
+    { type: "response_item", payload: task },
+    ...(extraPreviousUser ? [{ type: "response_item", payload: extraPreviousUser }] : []),
+    {
+      type: "event_msg",
+      payload: {
+        type: "task_complete",
+        turn_id: failedTurnId,
+        last_agent_message: null,
+        error: { message: "Selected model is at capacity. Please try a different model.", codex_error_info: errorInfo },
+      },
+    },
+    { type: "event_msg", payload: { type: "task_started", turn_id: retryTurnId } },
+    { type: "response_item", payload: currentEnvironment },
+    { type: "turn_context", payload: { turn_id: retryTurnId, model: currentModel, multi_agent_version: "v1" } },
+  ];
+  const parsed = request(nativeChildThreadId, retryTurnId, [task, currentEnvironment]);
+
+  const writeRollout = (values: unknown[]) => {
+    mkdirSync(rolloutDir, { recursive: true });
+    writeFileSync(rolloutPath, `${values.map(value => JSON.stringify(value)).join("\n")}\n`);
+  };
+
+  try {
+    writeRollout(records());
+    expect(extractChatGptTurnUserRevision(parsed, { codexHome })).toEqual(task.content);
+
+    writeRollout(records("other"));
+    expect(() => extractChatGptTurnUserRevision(parsed, { codexHome }))
+      .toThrow("conflicts with native Codex turn_id");
+
+    writeRollout(records("server_overloaded", undefined, "chatgpt-web/medium"));
+    expect(() => extractChatGptTurnUserRevision(parsed, { codexHome }))
+      .toThrow("conflicts with native Codex turn_id");
+
+    const stale = item("msg_stale", "user", "Old unrelated instruction.", failedTurnId);
+    (stale.internal_chat_message_metadata_passthrough as Record<string, unknown>).content_item_kinds = ["user.text"];
+    writeRollout(records("server_overloaded", stale));
+    const staleParsed = request(nativeChildThreadId, retryTurnId, [task, stale, currentEnvironment]);
+    expect(() => extractChatGptTurnUserRevision(staleParsed, { codexHome }))
+      .toThrow("conflicts with native Codex turn_id");
+  } finally {
+    rmSync(codexHome, { recursive: true, force: true });
+  }
 });
 
 test("V2 parent instructions bind the current environment without changing native message roles", () => {

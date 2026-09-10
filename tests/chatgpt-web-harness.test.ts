@@ -5,7 +5,7 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { buildResponseJSON } from "../src/bridge";
+import { adapterFailureFromMessage, buildResponseJSON } from "../src/bridge";
 import { ChatGptWebAdapterError, chatGptStoppedThinkingError } from "../src/adapters/chatgpt-web/adapter-error";
 import { ChatGptCompletionTracker, chatGptImageFilePayloads, chatGptPromptFilePayloads, chatGptTurnIsComplete } from "../src/adapters/chatgpt-web/browser-worker";
 import { ChatGptBrowserWorker, type BrowserTurn } from "../src/adapters/chatgpt-web/browser-worker";
@@ -1692,6 +1692,47 @@ describe("ChatGPT outer-native harness v4", () => {
   });
 
   test("keeps the ChatGPT rate-limit dialog distinct from model capacity and UI failures", () => {
+    const unavailableTemporaryChat = adapterFailureFromMessage(
+      "ChatGPT web login is expired or the Temporary Chat surface is unavailable",
+    );
+    expect(unavailableTemporaryChat).toEqual({
+      httpStatus: 502,
+      error: {
+        message: "ChatGPT web login is expired or the Temporary Chat surface is unavailable",
+        type: "server_error",
+        code: "upstream_server_error",
+      },
+    });
+
+    const explicitCapacity = adapterFailureFromMessage(
+      "Selected model is at capacity. Please try a different model.",
+    );
+    expect(explicitCapacity).toEqual({
+      httpStatus: 503,
+      error: {
+        message: "Selected model is at capacity. Please try a different model.",
+        type: "server_error",
+        code: "server_is_overloaded",
+      },
+    });
+
+    const generic503 = buildResponseJSON([{
+      type: "error",
+      message: "ChatGPT upstream service is temporarily unavailable.",
+      status: 503,
+      errorType: "server_error",
+      retryable: true,
+    }], CHATGPT_WEB_MODEL_ID) as {
+      status: string;
+      retryable: boolean;
+      error: { type: string; code: string };
+    };
+    expect(generic503).toMatchObject({
+      status: "failed",
+      retryable: true,
+      error: { type: "server_error", code: "upstream_server_error" },
+    });
+
     const rateLimit = buildResponseJSON([{
       type: "error",
       message: "ChatGPT rate limit: too many requests. Try again in a few minutes.",

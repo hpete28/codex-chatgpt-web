@@ -388,6 +388,40 @@ test("launcher page selection uses native ownership without evaluating unrelated
   });
 });
 
+test("launcher page selection does not wait for unrelated stalled target probes or detach", async () => {
+  const descriptor = readLauncherBrowserHostDescriptor(descriptorFile());
+  const stalledPage = {} as unknown as Page;
+  const ownedPage = {} as unknown as Page;
+  const context = {
+    pages: () => [stalledPage, ownedPage],
+    newCDPSession: async (page: Page) => {
+      if (page === stalledPage) return await new Promise<never>(() => {});
+      return {
+        send: async (method: string) => {
+          expect(method).toBe("Target.getTargetInfo");
+          return { targetInfo: { targetId: "native-owned-target" } };
+        },
+        detach: async () => await new Promise<never>(() => {}),
+      };
+    },
+  } as unknown as BrowserContext;
+  const browser = {
+    contexts: () => [context],
+  } as unknown as Browser;
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const selected = await Promise.race([
+      selectLauncherPage(browser, descriptor, 1_000),
+      new Promise<never>((_resolve, reject) => {
+        timeout = setTimeout(() => reject(new Error("owned launcher page selection was blocked by an unrelated target")), 400);
+      }),
+    ]);
+    expect(selected).toEqual({ context, page: ownedPage });
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+});
+
 test("launcher page selection rejects duplicated native target ownership", async () => {
   const descriptor = readLauncherBrowserHostDescriptor(descriptorFile());
   const page = () => ({

@@ -3401,6 +3401,7 @@ export class ChatGptBrowserWorker {
     deadline: number | undefined,
     abortSignal?: AbortSignal,
     externalProgress?: ChatGptTurnProgressReader,
+    recoverObservation?: ChatGptObservationRecovery,
     completionTracker = new ChatGptCompletionTracker(),
   ): Promise<void> {
     // A staged message may briefly create an assistant shell and then replace it while ChatGPT
@@ -3411,33 +3412,79 @@ export class ChatGptBrowserWorker {
       CHATGPT_MULTIPART_RESPONSE_DOM_GRACE_MS,
     );
     const responseDomCache: ChatGptResponseDomCache = {};
+    let observationPage = page;
+    let observationBaseline = submissionBaseline;
     let responseTurn = initialResponseTurn;
+    let recoveryAttempts = 0;
+    let reconcileBeforeSnapshot = false;
     for (;;) {
-      if (page.isClosed()) throw chatGptBrowserTabClosedError();
+      if (observationPage.isClosed()) throw chatGptBrowserTabClosedError();
       if (abortSignal?.aborted) {
-        const stop = page.locator(CHATGPT_STOP_BUTTON_SELECTOR).last();
+        const stop = observationPage.locator(CHATGPT_STOP_BUTTON_SELECTOR).last();
         if (await stop.isVisible().catch(() => false)) await stop.press("Enter").catch(() => {});
         throw new DOMException("ChatGPT multipart stage aborted", "AbortError");
       }
       if (deadline !== undefined && Date.now() >= deadline) {
         throw new Error("ChatGPT Bigger Context transaction timed out while awaiting a stage acknowledgement");
       }
-      await throwIfChatGptSessionFailureAlert(page);
+      await throwIfChatGptSessionFailureAlert(observationPage);
       await throwIfChatGptTerminalErrorAlert(responseTurn.locator);
-      let snapshot = await this.responseDomSnapshot(responseTurn.locator, responseDomCache);
-      if (!snapshot.responsePresent && await responseTurn.locator.count() !== 1) {
-        const rebound = await this.reconcileAssistantTurnBinding(
-          page,
-          submissionBaseline,
-          responseTurn,
+      let snapshot: ChatGptResponseDomSnapshot;
+      try {
+        if (reconcileBeforeSnapshot) {
+          responseTurn = await this.reconcileAssistantTurnBinding(
+            observationPage,
+            observationBaseline,
+            responseTurn,
+            abortSignal,
+          );
+          reconcileBeforeSnapshot = false;
+        }
+        snapshot = await withChatGptBrowserObservationTimeout(
+          this.responseDomSnapshot(responseTurn.locator, responseDomCache),
+        );
+        if (!snapshot.responsePresent) {
+          const rebound = await this.reconcileAssistantTurnBinding(
+            observationPage,
+            observationBaseline,
+            responseTurn,
+            abortSignal,
+          );
+          if (rebound.identity !== responseTurn.identity) {
+            responseTurn = rebound;
+            responseDomCache.key = undefined;
+            responseDomCache.snapshot = undefined;
+            snapshot = await withChatGptBrowserObservationTimeout(
+              this.responseDomSnapshot(responseTurn.locator, responseDomCache),
+            );
+          }
+        }
+        recoveryAttempts = 0;
+      } catch (error) {
+        if (!(error instanceof ChatGptBrowserObservationTimeoutError) || !recoverObservation) throw error;
+        recoveryAttempts += 1;
+        if (recoveryAttempts > MAX_CHATGPT_BROWSER_PAGE_REBINDS) {
+          throw new Error(
+            `ChatGPT multipart acknowledgement DOM remained unresponsive after ${MAX_CHATGPT_BROWSER_PAGE_REBINDS} same-page rebinds`,
+            { cause: error },
+          );
+        }
+        const recovered = await recoverObservation(
+          recoveryAttempts,
+          error,
+          observationBaseline,
           abortSignal,
         );
-        if (rebound.identity !== responseTurn.identity) {
-          responseTurn = rebound;
-          responseDomCache.key = undefined;
-          responseDomCache.snapshot = undefined;
-          snapshot = await this.responseDomSnapshot(responseTurn.locator, responseDomCache);
-        }
+        observationPage = recovered.page;
+        observationBaseline = recovered.baseline;
+        responseTurn = {
+          ...responseTurn,
+          locator: observationPage.locator(`[data-turn-id=${JSON.stringify(responseTurn.identity)}]`),
+        };
+        responseDomCache.key = undefined;
+        responseDomCache.snapshot = undefined;
+        reconcileBeforeSnapshot = true;
+        continue;
       }
       if (snapshot.stoppedThinkingVisible) throw chatGptStoppedThinkingError();
       const externalProgressSnapshot = externalProgress?.snapshot();
@@ -3462,7 +3509,7 @@ export class ChatGptBrowserWorker {
         await new Promise(resolveSleep => setTimeout(resolveSleep, 250));
         continue;
       }
-      const running = await page.locator(CHATGPT_STOP_BUTTON_SELECTOR).last().isVisible().catch(() => false);
+      const running = await observationPage.locator(CHATGPT_STOP_BUTTON_SELECTOR).last().isVisible().catch(() => false);
       const domError = domHealthTracker.update({
         responsePresent: snapshot.responsePresent,
         running,
@@ -4605,6 +4652,13 @@ export class ChatGptBrowserWorker {
                 deadline,
                 acknowledgementSignal,
                 turn.externalProgress,
+                launcherObservationRecovery
+                  ? async (...args) => {
+                    const recovered = await recoverAssistantObservation(...args);
+                    stageBaseline = recovered.baseline;
+                    return recovered;
+                  }
+                  : undefined,
               );
             },
             chatGptSuspensionClock,

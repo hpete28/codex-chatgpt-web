@@ -19,6 +19,7 @@ import type {
   ChatGptRootThreadMetadata,
   ChatGptThreadSpawnLineage,
   ChatGptTurnEnvironment,
+  ChatGptTurnUserRevision,
   ChatGptUnattributedEnvironmentMessage,
 } from "./environment";
 
@@ -278,6 +279,133 @@ function verifyHistoricalEnvironmentMessages(
     if (carry.length > MAX_ROLLOUT_JSON_LINE_BYTES) throw new Error("Codex rollout JSONL record exceeds the bounded record size");
   }
   throw new Error("Codex rollout has no current task boundary for environment history");
+}
+
+function compatibilityV1SubagentSessionMeta(item: Record<string, unknown>, threadId: string): boolean {
+  const payload = record(item.payload);
+  const source = record(payload?.source);
+  const subagent = record(source?.subagent);
+  const spawn = record(subagent?.thread_spawn);
+  const parentThreadId = typeof payload?.parent_thread_id === "string" ? payload.parent_thread_id : "";
+  return item.type === "session_meta"
+    && payload?.id === threadId
+    && payload.thread_source === "subagent"
+    && payload.multi_agent_version === "v1"
+    && CODEX_ID.test(parentThreadId)
+    && parentThreadId !== threadId
+    && spawn?.parent_thread_id === parentThreadId;
+}
+
+function verifyCompatibilityV1SubagentRestart(
+  fd: number,
+  size: number,
+  currentTurnId: string,
+  revision: ChatGptTurnUserRevision,
+): boolean {
+  const previousTurnId = revision.turnId;
+  const instructionId = revision.itemId;
+  if (!previousTurnId || !instructionId || previousTurnId === currentTurnId) return false;
+
+  let candidateInstructionSeen = false;
+  let previousTurnContextSeen = false;
+  let candidateFailureSeen = false;
+  let currentTaskStarted = false;
+  let currentTurnContextSeen = false;
+  let position = 0;
+  let carry = Buffer.alloc(0);
+  while (position < size) {
+    const length = Math.min(ROLLOUT_READ_CHUNK_BYTES, size - position);
+    const chunk = Buffer.alloc(length);
+    if (readSync(fd, chunk, 0, length, position) !== length) {
+      throw new Error("Codex rollout changed during Compatibility V1 restart lookup");
+    }
+    position += length;
+    const data = Buffer.concat([carry, chunk]);
+    let start = 0;
+    for (let end = data.indexOf(0x0a); end >= 0; end = data.indexOf(0x0a, start)) {
+      const line = data.subarray(start, end);
+      start = end + 1;
+      if (!line.length) continue;
+      if (line.length > MAX_ROLLOUT_JSON_LINE_BYTES) {
+        throw new Error("Codex rollout JSONL record exceeds the bounded record size");
+      }
+      const item = parseJsonLine(line);
+      const payload = record(item.payload);
+      if (item.type === "response_item" && payload?.type === "message" && payload.role === "user") {
+        const passthrough = record(payload.internal_chat_message_metadata_passthrough);
+        const ownerTurnId = typeof passthrough?.turn_id === "string" ? passthrough.turn_id : undefined;
+        const kinds = Array.isArray(passthrough?.content_item_kinds) ? passthrough.content_item_kinds : [];
+        if (kinds.includes("user.text")) {
+          if (ownerTurnId === previousTurnId) {
+            if (candidateInstructionSeen
+              || payload.id !== instructionId
+              || !isDeepStrictEqual(payload.content, revision.content)) return false;
+            candidateInstructionSeen = true;
+          } else if (ownerTurnId === currentTurnId) {
+            return false;
+          }
+        }
+      }
+      if (item.type === "turn_context" && payload?.turn_id === previousTurnId) {
+        if (payload.model !== "chatgpt-web/high" || payload.multi_agent_version !== "v1") return false;
+        previousTurnContextSeen = true;
+      }
+      if (item.type === "event_msg" && payload?.type === "task_complete" && payload.turn_id === previousTurnId) {
+        const error = record(payload.error);
+        if (!candidateInstructionSeen
+          || !previousTurnContextSeen
+          || payload.last_agent_message != null
+          || error?.codex_error_info !== "server_overloaded") return false;
+        candidateFailureSeen = true;
+      }
+      if (item.type === "event_msg" && payload?.type === "task_started" && payload.turn_id === currentTurnId) {
+        if (!candidateFailureSeen) return false;
+        currentTaskStarted = true;
+      }
+      if (item.type === "turn_context" && payload?.turn_id === currentTurnId) {
+        if (!currentTaskStarted
+          || payload.model !== "chatgpt-web/high"
+          || payload.multi_agent_version !== "v1") return false;
+        currentTurnContextSeen = true;
+      }
+    }
+    carry = Buffer.from(data.subarray(start));
+    if (carry.length > MAX_ROLLOUT_JSON_LINE_BYTES) {
+      throw new Error("Codex rollout JSONL record exceeds the bounded record size");
+    }
+  }
+  return candidateInstructionSeen && previousTurnContextSeen && candidateFailureSeen
+    && currentTaskStarted && currentTurnContextSeen;
+}
+
+export function isAcceptedCompatibilityV1SubagentRestart(options: {
+  codexHome: string;
+  threadId: string;
+  currentTurnId: string;
+  revision: ChatGptTurnUserRevision;
+}): boolean {
+  const { codexHome, threadId, currentTurnId, revision } = options;
+  if (!CODEX_ID.test(threadId) || !CODEX_ID.test(currentTurnId)
+    || !revision.turnId || !CODEX_ID.test(revision.turnId)) return false;
+  const candidates = scanCanonicalRollouts(codexHome, threadId);
+  let accepted = false;
+  for (const candidate of candidates) {
+    const rolloutPath = validateRolloutPath(codexHome, candidate, threadId);
+    const fd = openSync(rolloutPath, "r");
+    try {
+      const size = fstatSync(fd).size;
+      if (!Number.isSafeInteger(size) || size <= 0) continue;
+      if (!compatibilityV1SubagentSessionMeta(firstRolloutRecord(fd, size), threadId)) continue;
+      const latest = latestTurnContext(fd, size);
+      if (latest?.turn_id !== currentTurnId) continue;
+      if (!verifyCompatibilityV1SubagentRestart(fd, size, currentTurnId, revision)) continue;
+      if (accepted) throw new Error("Codex has multiple canonical rollouts for the Compatibility V1 subagent restart");
+      accepted = true;
+    } finally {
+      closeSync(fd);
+    }
+  }
+  return accepted;
 }
 
 function validateSessionMeta(

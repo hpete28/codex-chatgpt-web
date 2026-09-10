@@ -1,8 +1,10 @@
 import { homedir } from "node:os";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { getCodexHome } from "../../codex-integration-shared";
 import { isReadableCompactionSummaryText, OPAQUE_COMPACTION_NOTE } from "../../responses/compaction";
 import type { CodexContentPart, CodexParsedRequest, CodexTool } from "../../types";
 import { isAcceptedCompactionContinuation } from "./compaction-continuation";
+import { isAcceptedCompatibilityV1SubagentRestart } from "./codex-rollout-environment";
 
 export type ChatGptSandboxPolicy =
   | { type: "dangerFullAccess" }
@@ -216,19 +218,30 @@ export function priorChatGptAbortedTurnIds(parsed: CodexParsedRequest): string[]
  * installs the replacement history, the immediate continuation starts a fresh browser response
  * under the same logical task revision.
  */
-export function extractChatGptTurnUserRevision(parsed: CodexParsedRequest): unknown {
+export function extractChatGptTurnUserRevision(
+  parsed: CodexParsedRequest,
+  options: { codexHome?: string } = {},
+): unknown {
   const identity = extractChatGptTurnIdentity(parsed);
   const turnId = identity.turnId;
   if (!turnId) throw new Error("ChatGPT web requires native Codex turn_id metadata for browser-session replay");
   const revision = latestChatGptTurnUserRevision(parsed, turnId);
   if (!revision) throw new Error("ChatGPT web requires a current-turn user message for browser-session replay");
   // A pre-turn compact may summarize an earlier user message before native Codex continues
-  // under its new turn id without adding a new human message. Accept only our exact completed
-  // checkpoint; an arbitrary older prompt is still not a new instruction or a valid handoff.
-  if (revision.turnId !== undefined && revision.turnId !== turnId
-    && (priorChatGptAbortedTurnIds(parsed).includes(revision.turnId)
-      || !isAcceptedCompactionContinuation(parsed, identity, revision))) {
-    throw new Error(CHATGPT_TURN_REVISION_CONFLICT_MESSAGE);
+  // under its new turn id without adding a new human message. Compatibility V1 can also reopen a
+  // child after a High-capacity failure without re-emitting the direct-parent task. Accept that
+  // older task only when the canonical native rollout proves the exact V1 child/restart sequence.
+  if (revision.turnId !== undefined && revision.turnId !== turnId) {
+    const aborted = priorChatGptAbortedTurnIds(parsed).includes(revision.turnId);
+    const compaction = !aborted && isAcceptedCompactionContinuation(parsed, identity, revision);
+    const v1SubagentRestart = !aborted && !compaction && identity.threadId !== undefined
+      && isAcceptedCompatibilityV1SubagentRestart({
+        codexHome: options.codexHome ?? getCodexHome(),
+        threadId: identity.threadId,
+        currentTurnId: turnId,
+        revision,
+      });
+    if (!compaction && !v1SubagentRestart) throw new Error(CHATGPT_TURN_REVISION_CONFLICT_MESSAGE);
   }
   return revision.content;
 }

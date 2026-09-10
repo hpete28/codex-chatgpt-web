@@ -444,6 +444,136 @@ test("a stalled DOM observation fails within its probe budget", async () => {
 
 });
 
+test("Bigger Context keeps an accepted stage and rebinds its acknowledgement after a stalled DOM probe", async () => {
+  const provider: CodexProviderConfig = {
+    adapter: "chatgpt-web",
+    baseUrl: `browser://multipart-ack-recovery-${Date.now()}-${Math.random()}`,
+    chatgptWeb: { localToolsEnabled: false, solAvailable: true, proAvailable: true },
+  };
+  type Baseline = {
+    initialTurnIdentities: string[];
+    domCache: Record<string, unknown>;
+  };
+  type Binding = {
+    identity: string;
+    locator: unknown;
+    acceptedTurnIdentities: string[];
+  };
+  type Snapshot = {
+    responsePresent: boolean;
+    visibleText: string;
+    fullHtml: string;
+    markdownSegments: unknown[];
+    completionActionVisible: boolean;
+    stoppedThinkingVisible: boolean;
+    traceBlocks: unknown[];
+  };
+  const worker = ChatGptBrowserWorker.forProvider(provider) as unknown as {
+    waitForMultipartAcknowledgement(
+      page: Page,
+      responseTurn: Binding,
+      baseline: Baseline,
+      stage: ReturnType<typeof formatChatGptWebMultipartStage>,
+      deadline: number | undefined,
+      signal?: AbortSignal,
+      progress?: unknown,
+      recoverObservation?: (
+        attempt: number,
+        cause: ChatGptBrowserObservationTimeoutError,
+        baseline: Baseline,
+        signal?: AbortSignal,
+      ) => Promise<{ page: Page; baseline: Baseline }>,
+      completionTracker?: ChatGptCompletionTracker,
+    ): Promise<void>;
+    responseDomSnapshot(locator: unknown): Promise<Snapshot>;
+    reconcileAssistantTurnBinding(
+      page: Page,
+      baseline: Baseline,
+      binding: Binding,
+      signal?: AbortSignal,
+    ): Promise<Binding>;
+  };
+
+  const hiddenLocator = {
+    filter() { return this; },
+    last() { return this; },
+    getByText() { return this; },
+    getByTestId() { return this; },
+    isVisible: async () => false,
+    press: async () => {},
+  };
+  const responseLocator = (pageName: string) => ({
+    ...hiddenLocator,
+    pageName,
+  });
+  const firstResponse = responseLocator("first");
+  const reboundResponse = responseLocator("rebound");
+  const makePage = (name: string, response: unknown) => ({
+    name,
+    isClosed: () => false,
+    locator: (selector: string) => selector.startsWith("[data-turn-id=") ? response : hiddenLocator,
+  }) as unknown as Page;
+  const firstPage = makePage("first", firstResponse);
+  const reboundPage = makePage("rebound", reboundResponse);
+  const firstBaseline: Baseline = { initialTurnIdentities: [], domCache: {} };
+  const reboundBaseline: Baseline = { initialTurnIdentities: [], domCache: {} };
+  const responseTurn: Binding = {
+    identity: "assistant-turn",
+    locator: firstResponse,
+    acceptedTurnIdentities: ["assistant-turn"],
+  };
+  const stage = formatChatGptWebMultipartStage(
+    JSON.stringify({ records: [{ role: "user", content: "accepted stage" }] }),
+    `ctx_${"1".repeat(32)}`,
+    1,
+    2,
+  );
+
+  const observedLocators: unknown[] = [];
+  worker.responseDomSnapshot = async locator => {
+    observedLocators.push(locator);
+    if (observedLocators.length === 1) {
+      throw new ChatGptBrowserObservationTimeoutError(5_000);
+    }
+    return {
+      responsePresent: true,
+      visibleText: stage.acknowledgement,
+      fullHtml: stage.acknowledgement,
+      markdownSegments: [],
+      completionActionVisible: true,
+      stoppedThinkingVisible: false,
+      traceBlocks: [],
+    };
+  };
+  const reconciliations: Array<{ page: Page; baseline: Baseline }> = [];
+  worker.reconcileAssistantTurnBinding = async (page, baseline, binding) => {
+    reconciliations.push({ page, baseline });
+    return { ...binding, locator: reboundResponse };
+  };
+  let recoveries = 0;
+  await expect(worker.waitForMultipartAcknowledgement(
+    firstPage,
+    responseTurn,
+    firstBaseline,
+    stage,
+    undefined,
+    undefined,
+    undefined,
+    async (attempt, cause, baseline) => {
+      recoveries += 1;
+      expect(attempt).toBe(1);
+      expect(cause).toBeInstanceOf(ChatGptBrowserObservationTimeoutError);
+      expect(baseline).toBe(firstBaseline);
+      return { page: reboundPage, baseline: reboundBaseline };
+    },
+    new ChatGptCompletionTracker(0),
+  )).resolves.toBeUndefined();
+
+  expect(recoveries).toBe(1);
+  expect(observedLocators).toEqual([firstResponse, reboundResponse, reboundResponse]);
+  expect(reconciliations).toEqual([{ page: reboundPage, baseline: reboundBaseline }]);
+});
+
 test("an accepted Full-mode send survives one stalled DOM probe and a later MCP batch without resending", async () => {
   const provider: CodexProviderConfig = {
     adapter: "chatgpt-web",

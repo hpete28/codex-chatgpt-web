@@ -56,6 +56,15 @@ function isPermissionMessage(text: string): boolean {
   );
 }
 
+function isOverloadMessage(text: string): boolean {
+  return (
+    text.includes("overloaded") ||
+    text.includes("server is busy") ||
+    text.includes("selected model is at capacity") ||
+    text.includes("model is at capacity")
+  );
+}
+
 /**
  * Client cancelled / closed the turn. Matches only explicit client-abort phrases
  * produced by request handlers and adapters. Deliberately narrow: bare "client closed"
@@ -144,14 +153,10 @@ export function classifyError(status: number, type: string, message: string): Co
   ) {
     return { message, type: "permission_error", code: "permission_denied" };
   }
-  if (
-    status === 503 ||
-    text.includes("overloaded") ||
-    text.includes("server is busy") ||
-    text.includes("temporarily unavailable")
-  ) {
-    // Codex recognizes "server_is_overloaded" and applies retry-after backoff
-    // (responses.rs is_server_overloaded_error); generic "upstream_server_error" is not recognized.
+  if (isOverloadMessage(text)) {
+    // Codex recognizes "server_is_overloaded" and applies retry-after backoff, but a bare HTTP 503
+    // is not proof of model capacity. Preserve generic 5xx failures as upstream_server_error unless
+    // the provider message itself supplies an overload/capacity signal.
     return { message, type: "server_error", code: "server_is_overloaded" };
   }
   if (
@@ -204,12 +209,11 @@ export function inferHttpStatusFromAdapterMessage(message: string): number {
   // subscription/permission wording.
   if (isAuthenticationMessage(lower)) return 401;
   if (isSubscriptionGateMessage(lower) || isPermissionMessage(lower)) return 403;
-  if (
-    lower.includes("unavailable") ||
-    lower.includes("overloaded") ||
-    lower.includes("temporarily") ||
-    lower.includes("server is busy")
-  ) return 503;
+  // Only infer model/server overload from explicit overload/capacity wording. Browser-local
+  // failures also use words like "unavailable" (for example an unavailable Temporary Chat
+  // surface); treating those as 503 makes Codex surface the misleading "model is at capacity"
+  // message even though no capacity signal was observed.
+  if (isOverloadMessage(lower)) return 503;
   if (
     lower.includes("invalid") ||
     lower.includes("not found") ||

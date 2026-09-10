@@ -220,33 +220,59 @@ export async function selectLauncherPage(
   const targetId = descriptor.surfaceTargets[surfaceId];
   if (!targetId) throw new Error("Launcher browser surface is no longer registered with its native target");
   const deadline = Date.now() + timeoutMs;
+  const targetIds = new Map<Page, string>();
+  const pendingTargetProbes = new Map<Page, Promise<void>>();
+  const startTargetProbe = (candidate: { context: BrowserContext; page: Page }): Promise<void> => {
+    const cached = targetIds.get(candidate.page);
+    if (cached !== undefined) return Promise.resolve();
+    const pending = pendingTargetProbes.get(candidate.page);
+    if (pending) return pending;
+    const probe = (async () => {
+      const session = await candidate.context.newCDPSession(candidate.page).catch(() => undefined);
+      if (!session) return;
+      try {
+        const { targetInfo } = await session.send("Target.getTargetInfo");
+        if (typeof targetInfo.targetId === "string" && targetInfo.targetId) {
+          targetIds.set(candidate.page, targetInfo.targetId);
+        }
+      } catch {
+        // A renderer or target can be temporarily unavailable while another tab is busy. Leave the
+        // result uncached so a later loop can retry without making this page block its peers.
+      } finally {
+        // Target identity has already been captured. Do not make selection wait for a detach from a
+        // renderer that may itself be stalled; the session can finish cleaning up independently.
+        void session.detach().catch(() => {});
+      }
+    })().finally(() => {
+      pendingTargetProbes.delete(candidate.page);
+    });
+    pendingTargetProbes.set(candidate.page, probe);
+    return probe;
+  };
   do {
     if (abortSignal?.aborted) {
       throw new DOMException("Launcher browser connection aborted", "AbortError");
     }
     const candidates = browser.contexts().flatMap(context => context.pages().map(page => ({ context, page })));
-    // Target metadata belongs to the browser process. Evaluating every page here makes an
-    // unrelated busy/paused renderer block acquisition of an already-responsive owned page.
-    const inspected = await Promise.all(candidates.map(async candidate => {
-      const session = await candidate.context.newCDPSession(candidate.page).catch(() => undefined);
-      if (!session) return { ...candidate, targetId: undefined };
-      try {
-        const { targetInfo } = await session.send("Target.getTargetInfo");
-        return { ...candidate, targetId: targetInfo.targetId };
-      } catch {
-        return { ...candidate, targetId: undefined };
-      } finally {
-        await session.detach().catch(() => {});
-      }
-    }));
-    const owned = inspected.filter(candidate => candidate.targetId === targetId);
+    // Probe native target ownership concurrently, but never wait for every renderer. A single
+    // unrelated hung ChatGPT tab must not prevent acquisition of the responsive surface that owns
+    // this turn. Reuse an in-flight probe rather than stacking repeated CDP attaches while waiting.
+    const probes = candidates.map(startTargetProbe);
+    if (probes.length > 0) {
+      const remainingMs = Math.max(1, deadline - Date.now());
+      await Promise.race([
+        Promise.allSettled(probes).then(() => undefined),
+        new Promise<void>(resolve => setTimeout(resolve, Math.min(100, remainingMs))),
+      ]);
+    }
+    const owned = candidates.filter(candidate => targetIds.get(candidate.page) === targetId);
     if (owned.length === 1) {
       return { context: owned[0].context, page: owned[0].page };
     }
     if (owned.length > 1) {
       throw new Error(`Launcher browser host exposed ${owned.length} surfaces with the same ownership id`);
     }
-    await new Promise(resolve => setTimeout(resolve, 100));
+    if (Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 100));
   } while (Date.now() < deadline);
   throw new Error("Launcher browser host did not expose its owned browser surface");
 }
