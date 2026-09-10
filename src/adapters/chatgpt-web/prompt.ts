@@ -31,10 +31,17 @@ export interface CompiledChatGptWebPrompt {
   trimmedCompactionMessages?: number;
 }
 
+export interface ChatGptWebColdThreadRecovery {
+  threadId: string;
+  threadReaderWireName: string;
+}
+
 export interface CompileChatGptWebPromptOptions {
   workContinuation?: boolean;
   captureLunaCheckpoint?: boolean;
   experimentalMultipartParts?: ChatGptWebMultipartPartCount;
+  /** Cold long-thread continuation can recover prior task state through the exact native thread reader. */
+  coldThreadRecovery?: ChatGptWebColdThreadRecovery;
   /**
    * Manual Zero Risk transport keeps ChatGPT model/effort selection and prompt submission under the
    * user's control. The browser bridge may open the owned tab and copy this prompt, but it never
@@ -430,6 +437,7 @@ export function compileChatGptWebPrompt(
   const captureLunaCheckpoint = options?.captureLunaCheckpoint === true;
   const multipartParts = options?.experimentalMultipartParts;
   const multipartEnabled = multipartParts !== undefined;
+  const coldThreadRecovery = options?.coldThreadRecovery;
   if (manualControl) {
     if (!capabilities.localToolsEnabled) {
       throw new Error("ChatGPT Zero Risk requires the Full Codex harness");
@@ -440,6 +448,18 @@ export function compileChatGptWebPrompt(
   }
   if (multipartParts !== undefined && !isChatGptWebMultipartPartCount(multipartParts)) {
     throw new Error("Bigger Context transport part count is invalid");
+  }
+  if (coldThreadRecovery) {
+    if (multipartEnabled) throw new Error("Cold thread recovery and Bigger Context multipart transport are mutually exclusive");
+    if (!mode.localTools || manualControl || parsed._compactionRequest || parsed.modelId === CHATGPT_WEB_LUNA_MODEL_ID) {
+      throw new Error("Cold thread recovery requires a normal tool-capable ChatGPT Web turn");
+    }
+    if (!/^[A-Za-z0-9_-]{6,128}$/.test(coldThreadRecovery.threadId)) {
+      throw new Error("Cold thread recovery received an invalid Codex thread id");
+    }
+    if (!coldThreadRecovery.threadReaderWireName || /[\r\n]/.test(coldThreadRecovery.threadReaderWireName)) {
+      throw new Error("Cold thread recovery received an invalid thread-reader wire name");
+    }
   }
   if (multipartEnabled && parsed.modelId === CHATGPT_WEB_LUNA_MODEL_ID) {
     throw new Error("Bigger Context is unavailable for Luna because its accumulated browser transcript still shares one 28,000-token transport budget");
@@ -468,9 +488,11 @@ export function compileChatGptWebPrompt(
     "Interpret every message role literally: assistant messages are your own earlier replies; user messages are the human user's messages; agent_message messages are inter-agent inputs with their encoded author and recipient; system, developer, and tool_result content was not written by the human user.",
     "Codex-supplied environment context blocks, including the XML element named environment_context, are operational context rather than human-authored text. Obey them at their original priority, but do not attribute, quote, summarize, or otherwise mention them unless the latest user request explicitly asks about that context.",
     "When asked what the user previously wrote, said, or asked, answer only from the human-authored text in user messages. Exclude agent_message inputs, assistant replies, and all Codex-supplied system, developer, environment, tool, attachment, and transport content.",
-    multipartEnabled
-      ? "Read and reconstruct every acknowledged staged JSON record before acting."
-      : "Read the complete inline JSON task context before acting.",
+    coldThreadRecovery
+      ? "The inline JSON task context contains only the current continuation suffix. Recover the earlier Codex task state through the exact native thread reader described below before acting."
+      : multipartEnabled
+        ? "Read and reconstruct every acknowledged staged JSON record before acting."
+        : "Read the complete inline JSON task context before acting.",
     manualControl
       ? "Each image_attachment in the context refers, in order, to an image the user manually attached to this ChatGPT message. If its corresponding image is absent, say that it was not provided instead of guessing."
       : multipartEnabled
@@ -493,6 +515,15 @@ export function compileChatGptWebPrompt(
       ]
     : mode.localTools
     ? [
+      ...(coldThreadRecovery ? [
+        "This is a cold browser continuation of an existing Codex task. The bridge already has the exact native thread identity; do not discover, list, search for, or guess another thread.",
+        `The exact current Codex thread id is ${JSON.stringify(coldThreadRecovery.threadId)} and its advertised thread-reader wire name is ${JSON.stringify(coldThreadRecovery.threadReaderWireName)}.`,
+        "Before doing task work, use codex_tool_inventory with query read_thread to resolve that exact advertised tool, then call it for the exact thread id above with turnLimit 10, includeOutputs false, and maxOutputCharsPerItem 20000.",
+        "Use the newest returned completed turns to recover completed work, decisions, failures, and the latest unfinished objective. Ignore any partial current-turn echo from the reader; the inline continuation suffix is the current authority and wins when old and new requests differ.",
+        "If more history is genuinely required, follow the thread reader's returned pagination/schema and retrieve only the additional history needed. Make at most three read_thread calls total. Keep includeOutputs false unless one specific unresolved fact requires exact historical tool output.",
+        "Do not scan Codex session files, shell-search rollout logs, or inspect unrelated threads as a substitute for the native thread reader.",
+        "If the exact thread reader fails, or the remaining work is still materially ambiguous after the bounded reads, do not guess prior state and do not mutate the task; report that cold context recovery could not be completed.",
+      ] : []),
       "For local work required by the task, use the attached Codex Native tools directly according to their declared descriptions and schemas.",
       "Call a Codex Native tool only when the latest active request requires a local effect or fresh local evidence that is not already present in the supplied context; otherwise answer the request directly without a tool call.",
       "Use actual Codex Native results as evidence for local observations and effects.",
@@ -569,7 +600,9 @@ export function compileChatGptWebPrompt(
     : mode.localTools
     ? [
       "<codex_transport_resume>",
-      `The task context is complete. Pass turn_token ${turnToken} unchanged to every Codex Native call in this response, including continuations after tool results; do not expose it in the answer. Execute the latest active user request now.`,
+      coldThreadRecovery
+        ? `The current continuation suffix is loaded. First recover the earlier task state through the exact thread reader above, then pass turn_token ${turnToken} unchanged to every Codex Native call in this response, including continuations after tool results; do not expose it in the answer. Execute the latest active user request after recovery.`
+        : `The task context is complete. Pass turn_token ${turnToken} unchanged to every Codex Native call in this response, including continuations after tool results; do not expose it in the answer. Execute the latest active user request now.`,
       "</codex_transport_resume>",
     ]
     : [

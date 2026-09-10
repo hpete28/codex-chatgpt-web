@@ -24,7 +24,7 @@ import { callTurnBroker, TurnBroker, type BrokerToolResult } from "../src/adapte
 import { ChatGptExternalTurnProgress, ChatGptMirroredTurnProgress, chatGptExternalProgressIsLive, chatGptExternalToolCallsAreInFlight } from "../src/adapters/chatgpt-web/turn-progress";
 import { CHATGPT_WEB_MCP_INVOCATION_TIMEOUT_MS, chatGptMcpInvocationTimeout } from "../src/adapters/chatgpt-web/mcp-server";
 import { defaultBrokerEndpoint } from "../src/config";
-import { estimateChatGptWebUsage } from "../src/adapters/chatgpt-web/usage";
+import { estimateChatGptWebUsage, resolveBiggerContextMultipartParts } from "../src/adapters/chatgpt-web/usage";
 import { decodeCompactionSummary, SUMMARY_PREFIX } from "../src/responses/compaction";
 import { parseRequest } from "../src/responses/parser";
 import type { AdapterEvent, CodexParsedRequest, CodexProviderConfig, CodexTool } from "../src/types";
@@ -364,6 +364,116 @@ describe("ChatGPT outer-native harness v4", () => {
       expect(events.at(-1)).toMatchObject({ type: "done", stopReason: "stop", endTurn: true });
     } finally {
       (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = originalRun;
+      await TurnBroker.forSocket(socketPath).close();
+    }
+  });
+
+  test("cold long continuation uses the exact current Codex read_thread instead of multipart staging", async () => {
+    const socketPath = brokerTestEndpoint(`cgw-cold-thread-recovery-${process.pid}-${Date.now()}`);
+    const provider: CodexProviderConfig = {
+      adapter: "chatgpt-web",
+      baseUrl: `browser://chatgpt-cold-thread-recovery-${Date.now()}`,
+      chatgptWeb: {
+        browserHost: "launcher",
+        browserHostDescriptorPath: join(tempRoot, "cold-thread-recovery-launcher.json"),
+        brokerSocketPath: socketPath,
+        localToolsEnabled: true,
+        solAvailable: true,
+        proAvailable: true,
+        experimentalBiggerContext: true,
+      },
+    };
+    const request = rawWireRequest(environmentXml);
+    request.context.tools = [
+      ...tools,
+      {
+        name: "read_thread",
+        namespace: "mcp__codex_app",
+        description: "Read one exact Codex thread",
+        parameters: { type: "object" },
+      },
+    ];
+    request.context.messages = [
+      { role: "user", content: `OLD_HISTORY_MARKER ${"a ".repeat(110_000)}`, timestamp: 1 },
+      { role: "assistant", content: [{ type: "text", text: "Prior completed response" }], timestamp: 2 },
+      { role: "user", content: "Continue the latest unfinished work", timestamp: 3 },
+    ];
+    const capabilities = { localToolsEnabled: true, solAvailable: true, proAvailable: true, experimentalBiggerContext: true };
+    expect(resolveBiggerContextMultipartParts(request, capabilities)).toBeDefined();
+
+    const worker = ChatGptBrowserWorker.forProvider(provider);
+    const originalRun = worker.run.bind(worker);
+    (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = async turn => {
+      const cold = await turn.prepare();
+      expect(cold.multipart).toBeUndefined();
+      expect(cold.text).toContain("cold browser continuation");
+      expect(cold.text).toContain("thread_test_123");
+      expect(cold.text).toContain("mcp__codex_app__read_thread");
+      expect(cold.text).toContain("turnLimit 10, includeOutputs false, and maxOutputCharsPerItem 20000");
+      expect(cold.text).toContain("Make at most three read_thread calls total");
+      expect(cold.text).toContain("Continue the latest unfinished work");
+      expect(cold.text).not.toContain("OLD_HISTORY_MARKER");
+
+      const retained = await turn.prepareResume!();
+      expect(retained.multipart).toBeUndefined();
+      expect(retained.text).toContain("Continue the latest unfinished work");
+      expect(retained.text).not.toContain("cold browser continuation");
+      expect(retained.text).not.toContain("OLD_HISTORY_MARKER");
+
+      const answer = "Cold recovery preparation is valid";
+      turn.onTextDelta(answer);
+      return answer;
+    };
+    try {
+      const events: AdapterEvent[] = [];
+      await createChatGptWebAdapter(provider).runTurn!(request, { headers: new Headers() }, event => events.push(event));
+      expect(events.at(-1)).toMatchObject({ type: "done", stopReason: "stop", endTurn: true });
+    } finally {
+      (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = originalRun;
+      chatGptTurnSessions.clear();
+      await TurnBroker.forSocket(socketPath).close();
+    }
+  });
+
+  test("cold long continuation keeps Bigger Context when the exact Codex read_thread is unavailable", async () => {
+    const socketPath = brokerTestEndpoint(`cgw-cold-thread-fallback-${process.pid}-${Date.now()}`);
+    const provider: CodexProviderConfig = {
+      adapter: "chatgpt-web",
+      baseUrl: `browser://chatgpt-cold-thread-fallback-${Date.now()}`,
+      chatgptWeb: {
+        browserHost: "launcher",
+        browserHostDescriptorPath: join(tempRoot, "cold-thread-fallback-launcher.json"),
+        brokerSocketPath: socketPath,
+        localToolsEnabled: true,
+        solAvailable: true,
+        proAvailable: true,
+        experimentalBiggerContext: true,
+      },
+    };
+    const request = rawWireRequest(environmentXml);
+    request.context.messages = [
+      { role: "user", content: `FALLBACK_HISTORY_MARKER ${"a ".repeat(110_000)}`, timestamp: 1 },
+      { role: "assistant", content: [{ type: "text", text: "Prior completed response" }], timestamp: 2 },
+      { role: "user", content: "Continue the latest unfinished work", timestamp: 3 },
+    ];
+
+    const worker = ChatGptBrowserWorker.forProvider(provider);
+    const originalRun = worker.run.bind(worker);
+    (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = async turn => {
+      const prepared = await turn.prepare();
+      expect(prepared.multipart).toBeDefined();
+      expect(prepared.multipart!.parts.join("\n")).toContain("FALLBACK_HISTORY_MARKER");
+      const answer = "Bigger Context fallback is valid";
+      turn.onTextDelta(answer);
+      return answer;
+    };
+    try {
+      const events: AdapterEvent[] = [];
+      await createChatGptWebAdapter(provider).runTurn!(request, { headers: new Headers() }, event => events.push(event));
+      expect(events.at(-1)).toMatchObject({ type: "done", stopReason: "stop", endTurn: true });
+    } finally {
+      (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = originalRun;
+      chatGptTurnSessions.clear();
       await TurnBroker.forSocket(socketPath).close();
     }
   });

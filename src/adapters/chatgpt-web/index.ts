@@ -25,7 +25,7 @@ import { ChatGptBrowserWorker, type BrowserTurn } from "./browser-worker";
 import { workContinuationPrompt } from "./work-state";
 import { extractChatGptTurnEnvironment, extractChatGptTurnIdentity, priorChatGptAbortedTurnIds } from "./environment";
 import { CHATGPT_WEB_LUNA_MODEL_ID, resolveChatGptWebModelMode, type ChatGptWebCapabilities } from "./model";
-import { chatGptReadOnlyContextWarning, compileChatGptWebPrompt } from "./prompt";
+import { chatGptReadOnlyContextWarning, compileChatGptWebPrompt, type CompileChatGptWebPromptOptions } from "./prompt";
 import { createChatGptStructuredOutputValidator } from "./output-validation";
 import { chatGptWebTurnRetryPolicy } from "./retry-policy";
 import { TurnBroker, type BrokerToolRequest, type BrokerToolResult, type TurnBrokerOwner } from "./turn-broker";
@@ -334,6 +334,19 @@ function validateBatchTools(parsed: CodexParsedRequest, requests: BrokerToolRequ
   }
 }
 
+const CODEX_APP_THREAD_READER_NAMESPACE = "mcp__codex_app";
+
+/**
+ * Cold recovery is deliberately bound to Codex Desktop's exact current-turn tool registry.
+ * We never list/search for threads: the source thread id comes from trusted x-codex-turn-metadata.
+ */
+function currentCodexThreadReaderWireName(parsed: CodexParsedRequest): string | undefined {
+  const tool = (parsed.context.tools ?? []).find(candidate => (
+    candidate.name === "read_thread" && candidate.namespace === CODEX_APP_THREAD_READER_NAMESPACE
+  ));
+  return tool ? namespacedToolName(tool.namespace, tool.name) : undefined;
+}
+
 /** Keep the Responses bridge alive during every awaited phase of a browser turn. */
 export const CHATGPT_WEB_ADAPTER_HEARTBEAT_MS = 10_000;
 
@@ -430,14 +443,19 @@ export function createChatGptWebAdapter(
         await releaseLauncherRetainedConversation(retainedLauncherDescriptor, conversationKey);
       }
       : undefined;
+    const baseCompileOptions = manualRequest
+      ? {}
+      : {
+        captureLunaCheckpoint,
+        ...(workContinuation ? { workContinuation: true } : {}),
+      };
     const compileOptionsFor = (input: CodexParsedRequest) => {
       if (manualRequest) return {};
       const experimentalMultipartParts = experimentalBiggerContext
         ? resolveBiggerContextMultipartParts(input, turnCapabilities)
         : undefined;
       return {
-        captureLunaCheckpoint,
-        ...(workContinuation ? { workContinuation: true } : {}),
+        ...baseCompileOptions,
         ...(experimentalMultipartParts !== undefined
           ? { experimentalMultipartParts }
           : {}),
@@ -711,11 +729,21 @@ export function createChatGptWebAdapter(
       };
     }
     if (!environment) throw new Error("Tool-capable ChatGPT web mode requires a trusted Codex environment");
+    const threadReaderWireName = identity.threadId
+      ? currentCodexThreadReaderWireName(checkpointInput.parsed)
+      : undefined;
+    const coldThreadRecoveryEligible = Boolean(
+      experimentalBiggerContext
+      && conversationKey
+      && resumeInput
+      && identity.threadId
+      && threadReaderWireName
+    );
     const token = deferred<string>();
     const externalProgress = new ChatGptExternalTurnProgress();
     let tokenSettled = false;
     let activeToken: string | undefined;
-    const prepareWith = async (input: CodexParsedRequest) => {
+    const prepareWith = async (input: CodexParsedRequest, coldStart = false) => {
       const turnToken = activeToken ?? await broker.register(
         environment,
         timeoutMs === undefined ? undefined : timeoutMs + 60_000,
@@ -724,11 +752,33 @@ export function createChatGptWebAdapter(
       activeToken = turnToken;
       try {
         if (workContinuation) await broker.enableWorkContinuation!(turnToken);
+        let compiledInput = input;
+        let compileOptions: CompileChatGptWebPromptOptions;
+        if (coldStart && coldThreadRecoveryEligible) {
+          const multipartParts = resolveBiggerContextMultipartParts(checkpointInput.parsed, turnCapabilities);
+          if (multipartParts !== undefined) {
+            compiledInput = resumeInput!;
+            compileOptions = {
+              ...baseCompileOptions,
+              coldThreadRecovery: {
+                threadId: identity.threadId!,
+                threadReaderWireName: threadReaderWireName!,
+              },
+            };
+            console.info(
+              `[chatgpt-web] cold continuation using native read_thread recovery instead of ${multipartParts}-part Bigger Context staging`,
+            );
+          } else {
+            compileOptions = baseCompileOptions;
+          }
+        } else {
+          compileOptions = compileOptionsFor(input);
+        }
         const compiled = compileChatGptWebPrompt(
-          input,
+          compiledInput,
           turnCapabilities,
           turnToken,
-          compileOptionsFor(input),
+          compileOptions,
         );
         // Publish only after preparation succeeds: otherwise its failure revokes the token
         // before the response observer uses it and masks the cause as an expired capability.
@@ -749,7 +799,10 @@ export function createChatGptWebAdapter(
       modelId: parsed.modelId,
       reasoning: parsed.options.reasoning,
       capabilities: turnCapabilities,
-      prepare: () => prepareWith(checkpointInput.parsed),
+      // The launcher decides reuse from the exact conversationKey before either preparation path runs.
+      // A cold path may recover a long continuation through read_thread; an exact retained path keeps
+      // the existing suffix-only behavior and never performs thread recovery.
+      prepare: () => prepareWith(checkpointInput.parsed, true),
       ...(resumeInput ? { prepareResume: () => prepareWith(resumeInput) } : {}),
       ...(retainConversation ? { retainConversation: true, conversationKey } : {}),
       abortSignal: browserAbort.signal,
