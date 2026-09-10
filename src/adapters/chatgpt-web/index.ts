@@ -756,7 +756,10 @@ export function createChatGptWebAdapter(
         let compileOptions: CompileChatGptWebPromptOptions;
         if (coldStart && coldThreadRecoveryEligible) {
           const multipartParts = resolveBiggerContextMultipartParts(checkpointInput.parsed, turnCapabilities);
-          if (multipartParts !== undefined) {
+          const resumeMultipartParts = multipartParts === undefined
+            ? undefined
+            : resolveBiggerContextMultipartParts(resumeInput!, turnCapabilities);
+          if (multipartParts !== undefined && resumeMultipartParts === undefined) {
             compiledInput = resumeInput!;
             compileOptions = {
               ...baseCompileOptions,
@@ -769,7 +772,10 @@ export function createChatGptWebAdapter(
               `[chatgpt-web] cold continuation using native read_thread recovery instead of ${multipartParts}-part Bigger Context staging`,
             );
           } else {
-            compileOptions = baseCompileOptions;
+            compileOptions = {
+              ...baseCompileOptions,
+              ...(multipartParts !== undefined ? { experimentalMultipartParts: multipartParts } : {}),
+            };
           }
         } else {
           compileOptions = compileOptionsFor(input);

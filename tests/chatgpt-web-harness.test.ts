@@ -438,6 +438,60 @@ describe("ChatGPT outer-native harness v4", () => {
     }
   });
 
+  test("cold continuation keeps Bigger Context when the current suffix itself needs multipart transport", async () => {
+    const socketPath = brokerTestEndpoint(`cgw-cold-thread-large-suffix-${process.pid}-${Date.now()}`);
+    const provider: CodexProviderConfig = {
+      adapter: "chatgpt-web",
+      baseUrl: `browser://chatgpt-cold-thread-large-suffix-${Date.now()}`,
+      chatgptWeb: {
+        browserHost: "launcher",
+        browserHostDescriptorPath: join(tempRoot, "cold-thread-large-suffix-launcher.json"),
+        brokerSocketPath: socketPath,
+        localToolsEnabled: true,
+        solAvailable: true,
+        proAvailable: false,
+        experimentalBiggerContext: true,
+      },
+    };
+    const request = rawWireRequest(environmentXml);
+    request.options.reasoning = "low";
+    request.context.tools = [
+      ...tools,
+      {
+        name: "read_thread",
+        namespace: "mcp__codex_app",
+        description: "Read one exact Codex thread",
+        parameters: { type: "object" },
+      },
+    ];
+    request.context.messages = [
+      { role: "user", content: "Earlier task state", timestamp: 1 },
+      { role: "assistant", content: [{ type: "text", text: "Prior completed response" }], timestamp: 2 },
+      { role: "user", content: `LARGE_CURRENT_SUFFIX ${"z9Q$ ".repeat(10_000)}`, timestamp: 3 },
+    ];
+
+    const worker = ChatGptBrowserWorker.forProvider(provider);
+    const originalRun = worker.run.bind(worker);
+    (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = async turn => {
+      const prepared = await turn.prepare();
+      expect(prepared.multipart).toBeDefined();
+      expect(prepared.multipart!.parts.join("\n")).toContain("LARGE_CURRENT_SUFFIX");
+      expect(prepared.text).not.toContain("cold browser continuation");
+      const answer = "Large suffix stayed on Bigger Context";
+      turn.onTextDelta(answer);
+      return answer;
+    };
+    try {
+      const events: AdapterEvent[] = [];
+      await createChatGptWebAdapter(provider).runTurn!(request, { headers: new Headers() }, event => events.push(event));
+      expect(events.at(-1)).toMatchObject({ type: "done", stopReason: "stop", endTurn: true });
+    } finally {
+      (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = originalRun;
+      chatGptTurnSessions.clear();
+      await TurnBroker.forSocket(socketPath).close();
+    }
+  });
+
   test("cold long continuation keeps Bigger Context when the exact Codex read_thread is unavailable", async () => {
     const socketPath = brokerTestEndpoint(`cgw-cold-thread-fallback-${process.pid}-${Date.now()}`);
     const provider: CodexProviderConfig = {
