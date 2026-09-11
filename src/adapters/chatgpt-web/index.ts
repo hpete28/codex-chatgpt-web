@@ -245,6 +245,22 @@ function brokerResult(message: CodexToolResultMessage): BrokerToolResult {
   };
 }
 
+function brokerResultText(result: BrokerToolResult): string {
+  const text = result.content
+    .filter((part): part is { type: "text"; text: string } => (
+      Boolean(part)
+      && typeof part === "object"
+      && !Array.isArray(part)
+      && (part as { type?: unknown }).type === "text"
+      && typeof (part as { text?: unknown }).text === "string"
+    ))
+    .map(part => part.text)
+    .join("\n")
+    .trim();
+  if (text) return text;
+  return result.structuredContent === undefined ? "" : JSON.stringify(result.structuredContent);
+}
+
 function emitToolBatch(requests: BrokerToolRequest[], usage: CodexUsage, emit: (event: AdapterEvent) => void): void {
   for (const request of requests) {
     emit({ type: "tool_call_start", id: request.callId, name: request.wireName });
@@ -738,11 +754,18 @@ export function createChatGptWebAdapter(
       && resumeInput
       && identity.threadId
       && threadReaderWireName
+      && broker.invokeOwnerTool
     );
     const token = deferred<string>();
     const externalProgress = new ChatGptExternalTurnProgress();
     let tokenSettled = false;
     let activeToken: string | undefined;
+    const publishCapability = (turnToken: string): void => {
+      observeCapabilityRetirement(turnToken, externalProgress);
+      if (tokenSettled) return;
+      tokenSettled = true;
+      token.resolve(turnToken);
+    };
     const prepareWith = async (input: CodexParsedRequest, coldStart = false) => {
       const turnToken = activeToken ?? await broker.register(
         environment,
@@ -760,17 +783,45 @@ export function createChatGptWebAdapter(
             ? undefined
             : resolveBiggerContextMultipartParts(resumeInput!, turnCapabilities);
           if (multipartParts !== undefined && resumeMultipartParts === undefined) {
-            compiledInput = resumeInput!;
-            compileOptions = {
-              ...baseCompileOptions,
-              coldThreadRecovery: {
+            // Cold recovery is adapter-owned: publish the broker capability early enough for the
+            // outer Codex round to execute the exact advertised read_thread while browser.prepare()
+            // waits. This removes model discretion from the recovery step entirely.
+            publishCapability(turnToken);
+            let recoveredHistory = "";
+            try {
+              const recovery = await broker.invokeOwnerTool!(turnToken, threadReaderWireName!, {
                 threadId: identity.threadId!,
-                threadReaderWireName: threadReaderWireName!,
-              },
-            };
-            console.info(
-              `[chatgpt-web] cold continuation using native read_thread recovery instead of ${multipartParts}-part Bigger Context staging`,
-            );
+                turnLimit: 10,
+                includeOutputs: false,
+                maxOutputCharsPerItem: 20_000,
+              });
+              if (!recovery.isError) recoveredHistory = brokerResultText(recovery);
+              if (!recoveredHistory) {
+                console.warn("[chatgpt-web] native read_thread cold recovery returned no usable history; falling back to Bigger Context staging");
+              }
+            } catch (error) {
+              console.warn(
+                `[chatgpt-web] native read_thread cold recovery failed; falling back to Bigger Context staging: ${error instanceof Error ? error.message : String(error)}`,
+              );
+            }
+            if (recoveredHistory) {
+              compiledInput = resumeInput!;
+              compileOptions = {
+                ...baseCompileOptions,
+                coldThreadRecovery: {
+                  threadId: identity.threadId!,
+                  recoveredHistory,
+                },
+              };
+              console.info(
+                `[chatgpt-web] cold continuation preloaded native read_thread history instead of ${multipartParts}-part Bigger Context staging`,
+              );
+            } else {
+              compileOptions = {
+                ...baseCompileOptions,
+                experimentalMultipartParts: multipartParts,
+              };
+            }
           } else {
             compileOptions = {
               ...baseCompileOptions,
@@ -786,13 +837,9 @@ export function createChatGptWebAdapter(
           turnToken,
           compileOptions,
         );
-        // Publish only after preparation succeeds: otherwise its failure revokes the token
-        // before the response observer uses it and masks the cause as an expired capability.
-        observeCapabilityRetirement(turnToken, externalProgress);
-        if (!tokenSettled) {
-          tokenSettled = true;
-          token.resolve(turnToken);
-        }
+        // Normal paths publish only after compilation succeeds. Cold native-history recovery is the
+        // deliberate exception above because Codex must execute that preflight while prepare waits.
+        publishCapability(turnToken);
         return { ...compiled, release: () => {} };
       } catch (error) {
         await broker.revoke(turnToken);
@@ -1366,12 +1413,12 @@ export function createChatGptWebAdapter(
                   }
                   if (requests.length > 0) {
                     const revision = externalProgress.recordToolBatch(requests.length);
-                    if (!session.runtime.manualControl) {
-                      // The browser outcome is in the same race below and owns the semantic DOM and
-                      // renderer deadlines. A second fixed timer here can retire an accepted turn
-                      // while its same-tab observer is still recovering. Keep the causal barrier —
-                      // tools are not emitted until the browser captures their text boundary — but
-                      // let browser settlement or request cancellation end the wait.
+                    const browserObservationRequired = requests.some(request => request.browserObservationRequired !== false);
+                    if (!session.runtime.manualControl && browserObservationRequired) {
+                      // Model-authored tool calls still require the browser to capture their text
+                      // boundary before dispatch. Adapter-owned cold-recovery preflight calls happen
+                      // before any browser answer exists, so waiting for a DOM boundary there would
+                      // deadlock the deterministic recovery step.
                       await externalProgress.waitForToolBatchObservation(
                         revision,
                         toolWaitAbort.signal,

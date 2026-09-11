@@ -7,6 +7,7 @@ import {
   CompactionTransactionStore,
   type CompactionTransactionHandle,
 } from "./compaction-transaction";
+import { namespacedToolName } from "../../types";
 import type { ChatGptTurnEnvironment } from "./environment";
 import { parseWorkState, type ChatGptWorkState } from "./work-state";
 
@@ -20,6 +21,8 @@ export interface BrokerToolRequest {
   freeform: boolean;
   arguments?: Record<string, unknown>;
   input?: string;
+  /** Adapter-owned preflight calls have no ChatGPT DOM boundary to observe before dispatch. */
+  browserObservationRequired?: boolean;
 }
 
 export interface BrokerToolResult {
@@ -215,6 +218,11 @@ export interface TurnBrokerOwner {
   continueCompletedTurn?(token: string): { turnToken: string; state: ChatGptWorkState } | undefined
     | Promise<{ turnToken: string; state: ChatGptWorkState } | undefined>;
   register(environment: ChatGptTurnEnvironment, ttlMs?: number, traceId?: string): Promise<string>;
+  invokeOwnerTool?(
+    token: string,
+    wireName: string,
+    args?: Record<string, unknown>,
+  ): Promise<BrokerToolResult>;
   registerSafe(
     environment: ChatGptTurnEnvironment,
     surfaceNonce: string,
@@ -320,6 +328,38 @@ export class TurnBroker implements TurnBrokerOwner {
     this.pending.set(token, channel);
     console.info(`[chatgpt-web] broker trace=${traceId} registered tokenHash=${handleFingerprint(token)}`);
     return token;
+  }
+
+  invokeOwnerTool(
+    token: string,
+    wireName: string,
+    args: Record<string, unknown> = {},
+  ): Promise<BrokerToolResult> {
+    this.prune();
+    const channel = this.channels.get(token);
+    if (!channel || channel.completionCommitted) {
+      throw new Error("turn token is invalid, expired, revoked, or already completed");
+    }
+    if (channel.safe) throw new Error("Zero Risk turns do not support adapter-owned native preflight calls");
+    if (!channel.environment.tools.some(tool => namespacedToolName(tool.namespace, tool.name) === wireName)) {
+      throw new Error(`Adapter-owned native tool is not advertised by the active Codex turn: ${wireName}`);
+    }
+    const callId = opaqueId("call");
+    const toolRequest: BrokerToolRequest = {
+      callId,
+      wireName,
+      freeform: false,
+      arguments: args,
+      browserObservationRequired: false,
+    };
+    return new Promise<BrokerToolResult>((resolveInvoke, rejectInvoke) => {
+      channel.invocations.set(callId, { request: toolRequest, resolve: resolveInvoke, reject: rejectInvoke });
+      channel.queuedCallIds.push(callId);
+      console.info(
+        `[chatgpt-web] broker trace=${channel.traceId} queued call=${callId.slice(0, 17)} tool=${wireName} waiters=${channel.waiters.size}`,
+      );
+      this.scheduleToolWaiters(channel);
+    });
   }
 
   async registerSafe(

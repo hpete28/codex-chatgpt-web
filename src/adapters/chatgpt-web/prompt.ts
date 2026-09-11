@@ -33,7 +33,8 @@ export interface CompiledChatGptWebPrompt {
 
 export interface ChatGptWebColdThreadRecovery {
   threadId: string;
-  threadReaderWireName: string;
+  /** Exact bounded native thread-history result recovered by the bridge before browser execution. */
+  recoveredHistory: string;
 }
 
 export interface CompileChatGptWebPromptOptions {
@@ -457,8 +458,11 @@ export function compileChatGptWebPrompt(
     if (!/^[A-Za-z0-9_-]{6,128}$/.test(coldThreadRecovery.threadId)) {
       throw new Error("Cold thread recovery received an invalid Codex thread id");
     }
-    if (!coldThreadRecovery.threadReaderWireName || /[\r\n]/.test(coldThreadRecovery.threadReaderWireName)) {
-      throw new Error("Cold thread recovery received an invalid thread-reader wire name");
+    if (!coldThreadRecovery.recoveredHistory.trim()) {
+      throw new Error("Cold thread recovery received empty native thread history");
+    }
+    if (coldThreadRecovery.recoveredHistory.length > 1_000_000) {
+      throw new Error("Cold thread recovery native thread history exceeds the bounded recovery limit");
     }
   }
   if (multipartEnabled && parsed.modelId === CHATGPT_WEB_LUNA_MODEL_ID) {
@@ -489,7 +493,7 @@ export function compileChatGptWebPrompt(
     "Codex-supplied environment context blocks, including the XML element named environment_context, are operational context rather than human-authored text. Obey them at their original priority, but do not attribute, quote, summarize, or otherwise mention them unless the latest user request explicitly asks about that context.",
     "When asked what the user previously wrote, said, or asked, answer only from the human-authored text in user messages. Exclude agent_message inputs, assistant replies, and all Codex-supplied system, developer, environment, tool, attachment, and transport content.",
     coldThreadRecovery
-      ? "The inline JSON task context contains only the current continuation suffix. Recover the earlier Codex task state through the exact native thread reader described below before acting."
+      ? "The bridge already recovered the exact bounded native Codex thread history. Read that history together with the inline JSON continuation suffix before acting; the newer continuation suffix wins if the same request appears in both."
       : multipartEnabled
         ? "Read and reconstruct every acknowledged staged JSON record before acting."
         : "Read the complete inline JSON task context before acting.",
@@ -516,13 +520,11 @@ export function compileChatGptWebPrompt(
     : mode.localTools
     ? [
       ...(coldThreadRecovery ? [
-        "This is a cold browser continuation of an existing Codex task. The bridge already has the exact native thread identity; do not discover, list, search for, or guess another thread.",
-        `The exact current Codex thread id is ${JSON.stringify(coldThreadRecovery.threadId)} and its advertised thread-reader wire name is ${JSON.stringify(coldThreadRecovery.threadReaderWireName)}.`,
-        "Before doing task work, use codex_tool_inventory with query read_thread to resolve that exact advertised tool, then call it for the exact thread id above with turnLimit 10, includeOutputs false, and maxOutputCharsPerItem 20000.",
-        "Use the newest returned turns to recover the task state. Completed turns can establish finished work; failed or interrupted turns can establish recent requests, errors, and attempted work but must not be treated as proof that the work completed. Ignore any partial current-turn echo from the reader; the inline continuation suffix is the current authority and wins when old and new requests differ.",
-        "If more history is genuinely required, follow the thread reader's returned pagination/schema and retrieve only the additional history needed. Make at most three read_thread calls total. Do not request another history page when the returned page says hasMore is false or nextCursor is null. Keep includeOutputs false unless one specific unresolved fact requires exact historical tool output.",
-        "Do not scan Codex session files, shell-search rollout logs, or inspect unrelated threads as a substitute for the native thread reader.",
-        "If the exact thread reader fails, or the remaining work is still materially ambiguous after the bounded reads, do not guess prior state and do not mutate the task; report that cold context recovery could not be completed.",
+        "This is a cold browser continuation of an existing Codex task. The bridge already recovered the exact native history for the current thread before this browser message was sent.",
+        `The recovered history belongs only to Codex thread ${JSON.stringify(coldThreadRecovery.threadId)}. Do not discover, list, search for, or guess another thread for recovery.`,
+        "Use the newest recovered turns to reconstruct task state. Completed turns can establish finished work; failed or interrupted turns can establish recent requests, errors, and attempted work but must not be treated as proof that the work completed.",
+        "Ignore any partial current-turn echo in the recovered history; the inline continuation suffix is the current authority and wins when old and new requests differ.",
+        "Do not call read_thread or codex_tool_inventory merely to recover this continuation; that recovery has already been performed by the bridge.",
       ] : []),
       "For local work required by the task, use the attached Codex Native tools directly according to their declared descriptions and schemas.",
       "Call a Codex Native tool only when the latest active request requires a local effect or fresh local evidence that is not already present in the supplied context; otherwise answer the request directly without a tool call.",
@@ -601,7 +603,7 @@ export function compileChatGptWebPrompt(
     ? [
       "<codex_transport_resume>",
       coldThreadRecovery
-        ? `The current continuation suffix is loaded. First recover the earlier task state through the exact thread reader above, then pass turn_token ${turnToken} unchanged to every Codex Native call in this response, including continuations after tool results; do not expose it in the answer. Execute the latest active user request after recovery.`
+        ? `The recovered native history and current continuation suffix are loaded. Pass turn_token ${turnToken} unchanged to every Codex Native call in this response, including continuations after tool results; do not expose it in the answer. Execute the latest active user request now.`
         : `The task context is complete. Pass turn_token ${turnToken} unchanged to every Codex Native call in this response, including continuations after tool results; do not expose it in the answer. Execute the latest active user request now.`,
       "</codex_transport_resume>",
     ]
@@ -695,6 +697,17 @@ export function compileChatGptWebPrompt(
       return { text: multipart.commit, images, multipart };
     }
     const envelopeJson = withoutRetiredTurnHandles(JSON.stringify({ version: 3, system, messages }));
+    const recoveredThreadHistory = coldThreadRecovery
+      ? [
+        "<codex_native_thread_history_json>",
+        JSON.stringify({
+          version: 1,
+          thread_id: coldThreadRecovery.threadId,
+          history: coldThreadRecovery.recoveredHistory,
+        }),
+        "</codex_native_thread_history_json>",
+      ]
+      : [];
     const text = [
       ...sharedContract,
       ...transportContract,
@@ -702,6 +715,7 @@ export function compileChatGptWebPrompt(
       ...manualControlContract,
       ...checkpointContract,
       answerContract,
+      ...recoveredThreadHistory,
       "<codex_context_json>",
       envelopeJson,
       "</codex_context_json>",

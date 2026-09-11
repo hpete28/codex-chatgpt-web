@@ -404,33 +404,88 @@ describe("ChatGPT outer-native harness v4", () => {
 
     const worker = ChatGptBrowserWorker.forProvider(provider);
     const originalRun = worker.run.bind(worker);
+    let browserStarts = 0;
     (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = async turn => {
+      browserStarts += 1;
       const cold = await turn.prepare();
       expect(cold.multipart).toBeUndefined();
       expect(cold.text).toContain("cold browser continuation");
       expect(cold.text).toContain("thread_test_123");
-      expect(cold.text).toContain("mcp__codex_app__read_thread");
-      expect(cold.text).toContain("turnLimit 10, includeOutputs false, and maxOutputCharsPerItem 20000");
-      expect(cold.text).toContain("Make at most three read_thread calls total");
-      expect(cold.text).toContain("hasMore is false or nextCursor is null");
+      expect(cold.text).toContain("RECOVERED_HISTORY_MARKER");
+      expect(cold.text).toContain("recovery has already been performed by the bridge");
       expect(cold.text).toContain("failed or interrupted turns");
       expect(cold.text).toContain("Continue the latest unfinished work");
       expect(cold.text).not.toContain("OLD_HISTORY_MARKER");
-
-      const retained = await turn.prepareResume!();
-      expect(retained.multipart).toBeUndefined();
-      expect(retained.text).toContain("Continue the latest unfinished work");
-      expect(retained.text).not.toContain("cold browser continuation");
-      expect(retained.text).not.toContain("OLD_HISTORY_MARKER");
+      expect(cold.text).not.toContain("codex_tool_inventory with query read_thread");
+      expect(cold.text).not.toContain("First recover the earlier task state");
 
       const answer = "Cold recovery preparation is valid";
       turn.onTextDelta(answer);
       return answer;
     };
     try {
-      const events: AdapterEvent[] = [];
-      await createChatGptWebAdapter(provider).runTurn!(request, { headers: new Headers() }, event => events.push(event));
-      expect(events.at(-1)).toMatchObject({ type: "done", stopReason: "stop", endTurn: true });
+      const adapter = createChatGptWebAdapter(provider);
+      const firstEvents: AdapterEvent[] = [];
+      await adapter.runTurn!(request, { headers: new Headers() }, event => firstEvents.push(event));
+      const call = firstEvents.find(
+        (event): event is Extract<AdapterEvent, { type: "tool_call_start" }> => event.type === "tool_call_start",
+      );
+      expect(call?.name).toBe("mcp__codex_app__read_thread");
+      const args = firstEvents.find(
+        (event): event is Extract<AdapterEvent, { type: "tool_call_delta" }> => event.type === "tool_call_delta",
+      );
+      expect(JSON.parse(args!.arguments)).toEqual({
+        threadId: "thread_test_123",
+        turnLimit: 10,
+        includeOutputs: false,
+        maxOutputCharsPerItem: 20_000,
+      });
+      expect(firstEvents.at(-1)).toMatchObject({ type: "done", stopReason: "tool_use", endTurn: false });
+      expect(browserStarts).toBe(1);
+
+      const continuation = structuredClone(request);
+      const toolResult = JSON.stringify({
+        turns: [{
+          role: "assistant",
+          status: "completed",
+          content: "RECOVERED_HISTORY_MARKER: latest verified prior work",
+        }],
+        hasMore: false,
+        nextCursor: null,
+      });
+      continuation.context.messages.push(
+        {
+          role: "assistant",
+          content: [{ type: "toolCall", id: call!.id, name: call!.name, arguments: JSON.parse(args!.arguments) }],
+          timestamp: 4,
+        },
+        {
+          role: "toolResult",
+          toolCallId: call!.id,
+          toolName: call!.name,
+          content: toolResult,
+          isError: false,
+          timestamp: 5,
+        },
+      );
+      ((continuation._rawBody as { input: unknown[] }).input).push(
+        {
+          type: "function_call",
+          call_id: call!.id,
+          name: call!.name,
+          arguments: args!.arguments,
+        },
+        {
+          type: "function_call_output",
+          call_id: call!.id,
+          output: toolResult,
+        },
+      );
+
+      const finalEvents: AdapterEvent[] = [];
+      await adapter.runTurn!(continuation, { headers: new Headers() }, event => finalEvents.push(event));
+      expect(browserStarts).toBe(1);
+      expect(finalEvents.at(-1)).toMatchObject({ type: "done", stopReason: "stop", endTurn: true });
     } finally {
       (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = originalRun;
       chatGptTurnSessions.clear();
