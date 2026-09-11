@@ -3,6 +3,13 @@ import { SUMMARY_PREFIX } from "../../responses/compaction";
 import type { CodexParsedRequest } from "../../types";
 import { extractChatGptTurnIdentity } from "./environment";
 
+/**
+ * Bump when a retained browser conversation's transport contract becomes incompatible with a
+ * previously retained ChatGPT tab. This deliberately invalidates stale retained tabs without
+ * changing the native Codex thread identity.
+ */
+export const CHATGPT_RETAINED_CONVERSATION_PROTOCOL = 2;
+
 function messageText(item: Record<string, unknown>): string | undefined {
   const content = item.content;
   if (typeof content === "string") return content;
@@ -29,11 +36,16 @@ function compactionEpoch(input: unknown[] | undefined): unknown {
 export function chatGptConversationKey(
   parsed: CodexParsedRequest,
   namespace: string,
+  retainedProtocol = CHATGPT_RETAINED_CONVERSATION_PROTOCOL,
 ): string | undefined {
+  if (!Number.isSafeInteger(retainedProtocol) || retainedProtocol <= 0) {
+    throw new Error("ChatGPT retained conversation protocol must be a positive safe integer");
+  }
   const identity = extractChatGptTurnIdentity(parsed);
   if (!identity.threadId) return undefined;
   const raw = parsed._rawBody as { input?: unknown[] } | undefined;
   return createHash("sha256").update(JSON.stringify({
+    retainedProtocol,
     namespace,
     threadId: identity.threadId,
     modelId: parsed.modelId,

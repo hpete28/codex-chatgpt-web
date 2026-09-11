@@ -19,6 +19,7 @@ import {
 } from "../src/adapters/chatgpt-web/compaction-handoff";
 import { CompactionTransactionStore } from "../src/adapters/chatgpt-web/compaction-transaction";
 import {
+  CHATGPT_RETAINED_CONVERSATION_PROTOCOL,
   chatGptConversationKey,
   retainedConversationResumeRequest,
 } from "../src/adapters/chatgpt-web/conversation-key";
@@ -143,6 +144,13 @@ test("one browser conversation spans native turns and rotates only at compaction
     content: [{ type: "input_text", text: `${SUMMARY_PREFIX}\ncheckpoint` }],
   });
   expect(chatGptConversationKey(v1Compact, "provider")).not.toBe(chatGptConversationKey(before, "provider"));
+});
+
+test("retained conversation identity rotates when the browser transport protocol changes", () => {
+  const source = request(false);
+  const current = chatGptConversationKey(source, "provider");
+  expect(current).toBe(chatGptConversationKey(source, "provider", CHATGPT_RETAINED_CONVERSATION_PROTOCOL));
+  expect(current).not.toBe(chatGptConversationKey(source, "provider", CHATGPT_RETAINED_CONVERSATION_PROTOCOL - 1));
 });
 
 test("compaction capability is one-shot and structurally bound to its handoff id", async () => {
