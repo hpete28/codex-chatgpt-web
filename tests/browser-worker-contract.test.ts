@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { createContext, runInContext } from "node:vm";
 import type { Page } from "playwright-core";
 import { CHATGPT_BROWSER_OBSERVATION_PROBE_TIMEOUT_MS, CHATGPT_COMPLETION_SETTLE_MS, CHATGPT_EXTERNAL_PROGRESS_CLOCK_SKEW_MS, CHATGPT_EXTERNAL_PROGRESS_STALL_CEILING_MS, ChatGptCompletionTracker, chatGptExternalProgressSuppressesDomHealth, CHATGPT_RESPONSE_DOM_GRACE_MS, MAX_CHATGPT_INTERNAL_OBSERVATION_FAULTS, CHATGPT_COMPOSER_DOCUMENT_END_KEY, CHATGPT_COMPOSER_SELECT_ALL_KEY, ChatGptBrowserObservationTimeoutError, ChatGptBrowserWorker, ChatGptPromptAttachmentIntegrityError, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_PAGE_REBINDS, MAX_CHATGPT_BROWSER_TABS, MAX_CHATGPT_CONNECTOR_TRIGGER_ATTEMPTS, assertChatGptWebInputWithinLimits, assertChatGptWebMultipartInputWithinLimits, browserDiagnosticCheckpoint, chatGptConnectorAttachmentMode, chatGptNewTurnIdentity, chatGptReboundTurnIdentity, chatGptSubmissionEvidence, connectAfterClosingBrowserConnection, dismissChatGptTemporaryChatOnboarding, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, resolveChatGptWebMultipartStagingMode, sanitizeChatGptBrowserDiagnosticState, setChatGptThinkMode, stripChatGptTraceControlSuffix, throwIfChatGptRateLimitDialog, throwIfChatGptSessionFailureAlert, throwIfChatGptTerminalErrorAlert, withChatGptBrowserObservationTimeout, CHATGPT_MULTIPART_RESPONSE_DOM_GRACE_MS, browserStageTimeouts, ChatGptSuspensionClock, remainingStageBudgetMs } from "../src/adapters/chatgpt-web/browser-worker";
-import { ensureChatGptPersonalizedConnectorAccess } from "../src/adapters/chatgpt-web/browser-worker";
+import { ensureChatGptPersonalizedConnectorAccess, waitForOperationalChatGptViewport } from "../src/adapters/chatgpt-web/browser-worker";
 import { chatGptStoppedThinkingError } from "../src/adapters/chatgpt-web/adapter-error";
 import { CHATGPT_WEB_MODEL_ID } from "../src/adapters/chatgpt-web/model";
 import { CHATGPT_CONNECTOR_NAME, DEV_CHATGPT_CONNECTOR_NAME, defaultChromeExecutable, legacyChatGptConnectorMigrationMessage } from "../src/config";
@@ -423,6 +423,31 @@ test("launcher page acquisition proves a nonzero operational viewport before DOM
   expect(viewport).toBeGreaterThan(connect);
   expect(acquired).toBeGreaterThan(viewport);
   expect(workerSource).toContain("innerWidth >= width && innerHeight >= height");
+});
+
+test("operational viewport recovers when the polling wait times out but the same page directly proves its viewport", async () => {
+  let directProbeCalls = 0;
+  const page = {
+    waitForFunction: async () => { throw new Error("Timeout 10000ms exceeded."); },
+    evaluate: async () => {
+      directProbeCalls += 1;
+      return true;
+    },
+  } as unknown as Page;
+
+  await waitForOperationalChatGptViewport(page);
+  expect(directProbeCalls).toBe(1);
+});
+
+test("operational viewport still fails when the fallback probe cannot prove the page is usable", async () => {
+  const page = {
+    waitForFunction: async () => { throw new Error("Timeout 10000ms exceeded."); },
+    evaluate: async () => false,
+  } as unknown as Page;
+
+  await expect(waitForOperationalChatGptViewport(page)).rejects.toThrow(
+    "ChatGPT browser surface did not expose an operational viewport",
+  );
 });
 
 test("Luna turns without a retained conversation never send connector identity alone", () => {

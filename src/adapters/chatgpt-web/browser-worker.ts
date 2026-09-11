@@ -1120,16 +1120,36 @@ export async function connectAfterClosingBrowserConnection<T>(
 }
 
 export const CHATGPT_MIN_OPERATIONAL_VIEWPORT = Object.freeze({ width: 320, height: 240 });
+const CHATGPT_VIEWPORT_FALLBACK_PROBE_TIMEOUT_MS = 2_000;
 
-async function waitForOperationalChatGptViewport(page: Page, signal?: AbortSignal): Promise<void> {
+export async function waitForOperationalChatGptViewport(page: Page, signal?: AbortSignal): Promise<void> {
   try {
     await withBrowserTurnAbort(page.waitForFunction(
       ({ width, height }) => innerWidth >= width && innerHeight >= height,
       CHATGPT_MIN_OPERATIONAL_VIEWPORT,
       { polling: 50, timeout: 10_000 },
     ), signal);
+    return;
   } catch (error) {
     if (signal?.aborted) throw new DOMException("ChatGPT browser page acquisition aborted", "AbortError");
+    try {
+      const operational = await withBrowserTurnAbort(
+        withChatGptBrowserObservationTimeout(
+          page.evaluate(
+            ({ width, height }) => innerWidth >= width && innerHeight >= height,
+            CHATGPT_MIN_OPERATIONAL_VIEWPORT,
+          ),
+          CHATGPT_VIEWPORT_FALLBACK_PROBE_TIMEOUT_MS,
+        ),
+        signal,
+      );
+      if (operational) {
+        console.warn("[chatgpt-web] viewport wait timed out, but a direct same-page probe confirmed an operational viewport");
+        return;
+      }
+    } catch {
+      if (signal?.aborted) throw new DOMException("ChatGPT browser page acquisition aborted", "AbortError");
+    }
     throw new Error(
       `ChatGPT browser surface did not expose an operational viewport: ${error instanceof Error ? error.message : String(error)}`,
     );
