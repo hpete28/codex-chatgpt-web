@@ -7,6 +7,7 @@ import {
   extractChatGptTurnEnvironment,
   extractChatGptCompactionSourceRevision,
   extractChatGptContinuationEnvironmentClaim,
+  extractChatGptCwdlessEnvironmentRefreshClaim,
   extractChatGptTurnIdentity,
   extractChatGptThreadSpawnLineage,
   extractChatGptRootThreadMetadata,
@@ -130,6 +131,18 @@ function sameAuthority(left: ChatGptTurnEnvironment, right: ChatGptTurnEnvironme
       && left.sandboxPolicy.networkAccess === right.sandboxPolicy.networkAccess));
 }
 
+function matchesCwdlessEnvironmentRefresh(
+  environment: ChatGptTurnEnvironment,
+  claim: NonNullable<ReturnType<typeof extractChatGptCwdlessEnvironmentRefreshClaim>>,
+): boolean {
+  const expectedRoots = new Set(claim.roots.map(pathIdentity));
+  if (environment.roots.length !== expectedRoots.size
+    || environment.roots.some(path => !expectedRoots.has(pathIdentity(path)))
+    || environment.sandboxPolicy.type !== claim.sandboxType) return false;
+  return environment.sandboxPolicy.type === "dangerFullAccess"
+    || environment.sandboxPolicy.networkAccess === claim.networkAccess;
+}
+
 /**
  * Codex emits its trusted environment envelope when a task starts or its environment changes,
  * not on every follow-up. This store carries only that trusted authority across turns. Tool
@@ -159,7 +172,9 @@ export class ChatGptThreadEnvironmentStore {
       const currentCompaction = hasCurrentContext && isChatGptCompactionContinuation(parsed);
       const historicalMessages = hasCurrentContext && !currentCompaction && lineage
         ? unattributedChatGptEnvironmentMessages(parsed) : undefined;
-      if (hasCurrentContext && !currentCompaction && !historicalMessages) throw error;
+      const cwdlessRefresh = hasCurrentContext && !currentCompaction
+        ? extractChatGptCwdlessEnvironmentRefreshClaim(parsed) : undefined;
+      if (hasCurrentContext && !currentCompaction && !historicalMessages && !cwdlessRefresh) throw error;
       const currentClaim = currentCompaction ? extractChatGptContinuationEnvironmentClaim(parsed) : undefined;
       const rolloutIdentity = lineage ?? extractChatGptRootThreadMetadata(parsed);
       // Automatic compaction has a current turn_context; standalone compaction has only its
@@ -179,6 +194,9 @@ export class ChatGptThreadEnvironmentStore {
         if (rolloutEnvironment) {
           if (currentClaim && !sameAuthority(currentClaim, rolloutEnvironment)) {
             throw new Error("Compaction continuation environment conflicts with its current Codex rollout");
+          }
+          if (cwdlessRefresh && !matchesCwdlessEnvironmentRefresh(rolloutEnvironment, cwdlessRefresh)) {
+            throw new Error("Cwd-less Codex environment refresh conflicts with its current Codex rollout");
           }
           this.set(rolloutIdentity.threadId, rolloutEnvironment);
           return rolloutEnvironment;

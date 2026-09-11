@@ -461,6 +461,63 @@ function environmentMatchesCanonicalMetadata(
   return sandboxMetadataMatchesEnvironment(metadataSandboxValue, environmentText);
 }
 
+export function extractChatGptCwdlessEnvironmentRefreshClaim(parsed: CodexParsedRequest): {
+  roots: string[];
+  sandboxType: ChatGptSandboxPolicy["type"];
+  networkAccess: boolean;
+} | undefined {
+  const metadata = clientTurnMetadata(parsed);
+  const turnId = typeof metadata?.turn_id === "string" ? metadata.turn_id.trim() : "";
+  if (!turnId) return undefined;
+  const body = record(parsed._rawBody);
+  const input = Array.isArray(body?.input) ? body.input : [];
+  const claims: Array<{ roots: string[]; sandboxType: ChatGptSandboxPolicy["type"]; networkAccess: boolean }> = [];
+
+  for (const value of input) {
+    const item = record(value);
+    if (item?.type !== "message" || item.role !== "user" || itemTurnId(item) !== turnId
+      || typeof item.id !== "string" || !item.id) continue;
+    const itemMetadata = record(item.internal_chat_message_metadata_passthrough);
+    const contentKinds = itemMetadata?.content_item_kinds;
+    if (!Array.isArray(contentKinds) || contentKinds.length !== 1
+      || contentKinds[0] !== "environments.environment_context") continue;
+
+    const parts = typeof item.content === "string" ? [item.content]
+      : Array.isArray(item.content) ? item.content.map(part => record(part)?.text) : [];
+    const environments = parts.flatMap(part => {
+      if (typeof part !== "string") return [];
+      const text = part.trim();
+      return /^<environment_context>[\s\S]*<\/environment_context>$/.test(text) ? [text] : [];
+    });
+    if (environments.length !== 1) return undefined;
+    const text = environments[0]!;
+
+    // A refresh may omit cwd entirely, but an explicit or malformed cwd remains authoritative and
+    // must fail through the normal parser instead of being hidden behind rollout recovery.
+    if (/<\/?cwd\b/i.test(text)) return undefined;
+    const rootSections = [...text.matchAll(/<workspace_roots>[\s\S]*?<\/workspace_roots>/gi)];
+    if (rootSections.length !== 1) return undefined;
+    const rootSection = rootSections[0]![0];
+    const rootMatches = [...rootSection.matchAll(/<root>([^<]+)<\/root>/gi)].map(match => match[1] ?? "");
+    const rootOpenings = [...rootSection.matchAll(/<root\b[^>]*>/gi)];
+    const rootClosings = [...rootSection.matchAll(/<\/root\s*>/gi)];
+    if (rootMatches.length === 0 || rootOpenings.length !== rootMatches.length || rootClosings.length !== rootMatches.length) {
+      return undefined;
+    }
+
+    let roots: string[];
+    try { roots = uniqueAbsolutePaths(rootMatches, "workspace_roots"); }
+    catch { return undefined; }
+    const sandboxType = sandboxTypeFromEnvironment(text);
+    if (!sandboxType) return undefined;
+    const networkAccess = /<network_access>enabled<\/network_access>/i.test(text)
+      || /network access is enabled/i.test(text);
+    claims.push({ roots, sandboxType, networkAccess });
+  }
+
+  return claims.length === 1 ? claims[0] : undefined;
+}
+
 function isCurrentOrParentThreadVisualizationRoot(path: string, metadata: Record<string, unknown>): boolean {
   const threadIds = [metadata.thread_id, metadata.parent_thread_id]
     .filter((value): value is string => typeof value === "string")

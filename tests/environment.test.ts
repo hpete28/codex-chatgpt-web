@@ -821,6 +821,78 @@ describe("trusted Codex task environment continuity", () => {
     });
   });
 
+  test("recovers a same-turn Codex-owned cwd-less environment refresh from the exact current rollout", () => {
+    const codexHome = mkdtempSync(join(tmpdir(), "codex-chatgpt-cwdless-refresh-"));
+    temporaryRoots.push(codexHome);
+    const outerRoot = resolve(root, "codex-workspace-parent");
+    const workingRoot = resolve(outerRoot, "active-project");
+    const rolloutPath = join(codexHome, "sessions", "2026", "09", "11",
+      `rollout-2026-09-11T00-00-18-${rolloutThreadId}.jsonl`);
+    mkdirSync(dirname(rolloutPath), { recursive: true });
+    writeFileSync(rolloutPath, [
+      JSON.stringify({ type: "session_meta", payload: { id: rolloutThreadId, source: "vscode" } }),
+      JSON.stringify(childTurnContext(rolloutTurnId, {
+        cwd: workingRoot,
+        workspace_roots: [outerRoot, workingRoot],
+      })),
+    ].join("\n") + "\n");
+
+    const request = environmentlessChild();
+    const body = request._rawBody as {
+      client_metadata: Record<string, string>;
+      input: Array<Record<string, unknown>>;
+    };
+    body.client_metadata["x-codex-turn-metadata"] = JSON.stringify({
+      request_kind: "turn", thread_id: rolloutThreadId, turn_id: rolloutTurnId,
+      agent_name: "/root", sandbox_mode: "danger-full-access",
+      workspaces: { [outerRoot]: {}, [workingRoot]: {} },
+    });
+    body.input = [{
+      type: "message", role: "user", id: "msg_midnight_environment_refresh",
+      content: [{ type: "input_text", text: `<environment_context>
+  <current_date>2026-09-11</current_date>
+  <timezone>America/Toronto</timezone>
+  <filesystem><workspace_roots><root>${outerRoot}</root><root>${workingRoot}</root></workspace_roots>${dangerFullAccessProfileXml}</filesystem>
+</environment_context>` }],
+      internal_chat_message_metadata_passthrough: {
+        turn_id: rolloutTurnId,
+        content_item_kinds: ["environments.environment_context"],
+      },
+    }];
+
+    expect(new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome).resolve(request).cwd).toBe(workingRoot);
+  });
+
+  test("cwd-less refresh recovery stays fail-closed for malformed, unowned, or conflicting updates", () => {
+    const { codexHome, request } = resumedRootFixture();
+    const body = request._rawBody as { input: Array<Record<string, unknown>> };
+    const refresh = {
+      type: "message", role: "user", id: "msg_environment_refresh",
+      content: [{ type: "input_text", text: `<environment_context>
+  <filesystem><workspace_roots><root>${root}</root></workspace_roots>${dangerFullAccessProfileXml}</filesystem>
+</environment_context>` }],
+      internal_chat_message_metadata_passthrough: {
+        turn_id: rolloutTurnId,
+        content_item_kinds: ["environments.environment_context"],
+      },
+    };
+    body.input = [refresh];
+    const store = new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome);
+    expect(store.resolve(request).cwd).toBe(root);
+
+    (refresh.content[0] as { text: string }).text = `<environment_context><cwd/><filesystem><workspace_roots><root>${root}</root></workspace_roots>${dangerFullAccessProfileXml}</filesystem></environment_context>`;
+    expect(() => store.resolve(request)).toThrow("missing cwd");
+
+    (refresh.content[0] as { text: string }).text = `<environment_context><filesystem><workspace_roots><root>${root}</root></workspace_roots>${dangerFullAccessProfileXml}</filesystem></environment_context>`;
+    delete (refresh.internal_chat_message_metadata_passthrough as { content_item_kinds?: string[] }).content_item_kinds;
+    expect(() => store.resolve(request)).toThrow("missing cwd");
+
+    refresh.internal_chat_message_metadata_passthrough.content_item_kinds = ["environments.environment_context"];
+    const outside = resolve(root, "different-workspace");
+    (refresh.content[0] as { text: string }).text = `<environment_context><filesystem><workspace_roots><root>${outside}</root></workspace_roots>${dangerFullAccessProfileXml}</filesystem></environment_context>`;
+    expect(() => store.resolve(request)).toThrow("Cwd-less Codex environment refresh conflicts");
+  });
+
   test.skipIf(process.platform !== "win32")("resumed Windows tasks accept the same indexed rollout with either path namespace", () => {
     for (const namespaceHome of [false, true]) for (const namespaceRollout of [false, true]) {
       const { codexHome, request, rolloutPath } = resumedRootFixture();
