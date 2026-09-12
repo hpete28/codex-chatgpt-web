@@ -273,7 +273,7 @@ function loadCommittedBrowserSurface(
       if (contents.getURL() === url) finish();
     };
     const onFailed = (_event, errorCode, errorDescription, failedUrl, mainFrame) => {
-      if (!mainFrame) return;
+      if (!mainFrame || errorCode === -3) return;
       finish(new Error(
         `Browser idle document failed: ${errorDescription} (${errorCode}) at ${failedUrl}`,
       ));
@@ -296,6 +296,7 @@ function loadCommittedBrowserSurface(
     contents.on("destroyed", onDestroyed);
     try {
       Promise.resolve(contents.loadURL(url)).then(onReady, error => {
+        if (isAbortedNavigationError(error)) return;
         finish(error instanceof Error ? error : new Error(String(error)));
       });
     } catch (error) {

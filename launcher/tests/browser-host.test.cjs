@@ -176,6 +176,48 @@ test("primary browser initialization retries one stalled idle commit and then su
   }
 });
 
+test("primary browser initialization ignores delayed aborted loads from a timed-out attempt", async () => {
+  const keepTestAlive = setTimeout(() => {}, 100);
+  try {
+    const contents = new EventEmitter();
+    let currentUrl = "about:blank";
+    let loads = 0;
+    let stops = 0;
+    contents.isDestroyed = () => false;
+    contents.getURL = () => currentUrl;
+    contents.loadURL = (url) => {
+      loads += 1;
+      if (loads === 3) {
+        setTimeout(() => {
+          currentUrl = url;
+          contents.emit("did-finish-load");
+        }, 3);
+      }
+      return new Promise(() => {});
+    };
+    contents.stop = () => {
+      stops += 1;
+      if (stops === 2) {
+        setTimeout(() => contents.emit(
+          "did-fail-load", {}, -3, "", IDLE_BROWSER_URL, true,
+        ), 1);
+      }
+    };
+
+    await loadPrimaryBrowserSurface(contents, null, {
+      attempts: 3,
+      timeoutMs: 5,
+      retryDelayMs: 0,
+    });
+
+    assert.equal(loads, 3);
+    assert.equal(stops, 2);
+    assert.equal(currentUrl, IDLE_BROWSER_URL);
+  } finally {
+    clearTimeout(keepTestAlive);
+  }
+});
+
 test("primary browser initialization does not retry terminal failures and bounds stalled retries", async () => {
   const keepTestAlive = setTimeout(() => {}, 100);
   try {
