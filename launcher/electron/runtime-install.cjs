@@ -274,8 +274,15 @@ function ensurePackagedRuntime({ app, coreHome, resourcesPath }) {
       throw error;
     }
     if (previousMoved) {
-      fs.rmSync(previous, { recursive: true, force: true });
-      previousMoved = false;
+      try {
+        fs.rmSync(previous, { recursive: true, force: true });
+        previousMoved = false;
+      } catch {
+        // The replacement is already installed and validated. A stale process can keep the old
+        // runtime executable locked on Windows after the daemon has stopped, so rollback cleanup
+        // must not turn a successful atomic replacement into a launcher startup failure. Leave the
+        // validated previous directory behind for later cleanup rather than taking production down.
+      }
     }
   } finally {
     fs.rmSync(temporary, { recursive: true, force: true });

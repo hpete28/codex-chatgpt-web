@@ -331,6 +331,47 @@ test("failed candidate validation preserves the previous validated runtime", () 
   }
 });
 
+test("packaged runtime keeps a validated replacement when previous-runtime cleanup is locked", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-runtime-locked-previous-"));
+  const resourcesPath = runtimeFixture(root, "0.2.0");
+  const coreHome = path.join(root, "core-home");
+  const app = { isPackaged: true, getVersion: () => "0.2.0" };
+  const originalRemove = fs.rmSync;
+  try {
+    const installed = ensurePackagedRuntime({ app, coreHome, resourcesPath });
+    const source = path.join(resourcesPath, "runtime");
+    fs.writeFileSync(path.join(source, "app", "cli.js"), "new cli");
+    writeRuntimeManifest(source);
+
+    fs.rmSync = (target, options) => {
+      if (String(target).includes(".previous-")) {
+        const error = new Error("locked previous runtime");
+        error.code = "EPERM";
+        throw error;
+      }
+      return originalRemove(target, options);
+    };
+
+    assert.equal(ensurePackagedRuntime({ app, coreHome, resourcesPath }), installed);
+    assert.equal(fs.readFileSync(path.join(installed, "app", "cli.js"), "utf8"), "new cli");
+    assert.equal(
+      validateRuntimeBundle(installed, {
+        version: "0.2.0",
+        platform: process.platform,
+        arch: process.arch,
+      }),
+      installed,
+    );
+    assert.equal(
+      fs.readdirSync(path.dirname(installed)).some(name => name.includes(".previous-")),
+      true,
+    );
+  } finally {
+    fs.rmSync = originalRemove;
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("packaged runtime replaces stale files when a release is refreshed under the same version", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-runtime-refresh-"));
   const resourcesPath = runtimeFixture(root, "0.2.0");
