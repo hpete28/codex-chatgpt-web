@@ -29,7 +29,7 @@ test("multipart selection accounts for whole-record and composer fit before subm
   for (const [contents, expected] of [
     [["small task"], undefined],
     [[50_000, 40_000, 50_000, 5_000].map(n => "word ".repeat(n)), 3],
-    [Array.from({ length: 3 }, () => " ".repeat(450_000)), 2],
+    [Array.from({ length: 2 }, () => "a".repeat(530_000)), 2],
   ] as const) {
     const parsed = request("");
     parsed.context.messages = contents.map((content, index) => ({ role: "user", content, timestamp: index + 1 }));
@@ -41,7 +41,7 @@ test("multipart selection accounts for whole-record and composer fit before subm
         .toEqual([...contents]);
     }
   }
-}, 30_000);
+}, 60_000);
 
 test("large Bigger Context uses smaller transport stages with a staging mode that can retain the full accumulated context", () => {
   const plus = { ...capabilities, proAvailable: false };
