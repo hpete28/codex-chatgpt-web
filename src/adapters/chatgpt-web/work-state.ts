@@ -29,6 +29,16 @@ export const WORK_STATE_CONTRACT = [
   "No status is needed for a simple direct answer. Missing or ambiguous status does not authorize automatic continuation. Native Goal completion/blocking remains governed by the original Codex instructions and tools.",
 ].join("\n");
 
+export function stalledResponseContinuationPrompt(turnToken: string): string {
+  return [
+    "Continue the existing authorized Codex task in this retained conversation. The previous Web response stopped making observable progress and the bridge stopped only that wedged generation to keep the native Codex turn alive.",
+    "This is recovery of the same task, not a replay of the original request. Preserve prior decisions, results, running process sessions, and verified tool effects. Before any new mutation, inspect current Codex state and do not repeat an effect whose outcome is uncertain.",
+    "Reassess what remains from the retained conversation and latest Codex evidence. If the task is already complete or blocked, record that accurately and finish instead of manufacturing more work.",
+    `Pass turn_token ${turnToken} to every Codex Native call. The existing native capability remains active for this recovery segment.`,
+    WORK_STATE_CONTRACT,
+  ].join("\n");
+}
+
 export function workContinuationPrompt(turnToken: string, state: ChatGptWorkState): string {
   return [
     "Continue the existing authorized Codex task in this retained conversation. The previous Web response completed cleanly, but your recorded work state says required work remains.",

@@ -677,7 +677,7 @@ describe("ChatGPT outer-native harness v4", () => {
     }
   });
 
-  test.each(["continue", "complete", "blocked", "missing", "cancel", "compaction", "initial-error", "uncertain-send", "missing-retained"])(
+  test.each(["continue", "complete", "blocked", "missing", "cancel", "compaction", "initial-error", "uncertain-send", "missing-retained", "stall-recovery"])(
     "retained work continuation: %s", async scenario => {
     const socketPath = brokerTestEndpoint(`cgw-work-state-${scenario}-${process.pid}-${Date.now()}`);
     const provider: CodexProviderConfig = {
@@ -692,6 +692,7 @@ describe("ChatGPT outer-native harness v4", () => {
     const adapter = createChatGptWebAdapter(provider);
     const turns: BrowserTurn[] = [];
     const prompts: string[] = [];
+    const tokens: string[] = [];
     let originalSubmissions = 0;
     let cancelledAtBoundary = false;
     const client = new Client({ name: "work-continuation-test", version: "1.0.0" });
@@ -708,6 +709,7 @@ describe("ChatGPT outer-native harness v4", () => {
       prompts.push(prepared.text);
       const token = prepared.text.match(/turn_token (turn_[A-Za-z0-9_-]+)/)?.[1];
       expect(token).toBeDefined();
+      tokens.push(token!);
       if (index === 1) {
         turn.onSendActivated?.();
         turn.onSubmitted?.();
@@ -721,7 +723,7 @@ describe("ChatGPT outer-native harness v4", () => {
         expect(turn.onSendActivated).toBeUndefined();
         await expect(turn.prepare()).rejects.toThrow("exact retained");
       }
-      if (scenario !== "missing") {
+      if (scenario !== "missing" && !(scenario === "stall-recovery" && index === 1)) {
         const status = index === 2 || scenario === "complete" ? "complete"
           : scenario === "blocked" ? "blocked" : "continue";
         const recorded = await client.callTool({ name: "codex_tool_call", arguments: {
@@ -733,6 +735,12 @@ describe("ChatGPT outer-native harness v4", () => {
       if (index === 2 && scenario === "uncertain-send") throw new Error("follow-up Send activated but acceptance is uncertain");
       if (scenario === "initial-error") throw new Error("original submitted response failed before completion");
       if (scenario === "compaction") broker.requestCompaction(token!, { content: [] });
+      if (scenario === "stall-recovery" && index === 1) {
+        const partial = "Partial response.";
+        turn.onTextDelta(partial);
+        turn.onStalledResponseStopped?.();
+        return partial;
+      }
       const answer = index === 1 ? "First response." : "Required checks finished.";
       turn.onTextDelta(answer);
       const revision = await turn.completionFence!.begin();
@@ -751,7 +759,7 @@ describe("ChatGPT outer-native harness v4", () => {
       await client.connect(transport);
       const events: AdapterEvent[] = [];
       await adapter.runTurn!(request, { headers: new Headers() }, event => events.push(event));
-      const continuing = ["continue", "uncertain-send", "missing-retained"].includes(scenario);
+      const continuing = ["continue", "uncertain-send", "missing-retained", "stall-recovery"].includes(scenario);
       expect(turns).toHaveLength(continuing ? 2 : 1);
       expect(originalSubmissions).toBe(1);
       if (["cancel", "initial-error", "uncertain-send", "missing-retained"].includes(scenario)) {
@@ -761,7 +769,16 @@ describe("ChatGPT outer-native harness v4", () => {
         expect(events.at(-1)).toMatchObject({ type: "done", stopReason: "stop", endTurn: true });
         const answer = events.filter((event): event is Extract<AdapterEvent, { type: "text_delta" }> => event.type === "text_delta" && event.phase === "final_answer")
           .map(event => event.text).join("");
-        expect(answer).toBe(scenario === "continue" ? "First response.\n\nRequired checks finished." : "First response.");
+        expect(answer).toBe(scenario === "continue"
+          ? "First response.\n\nRequired checks finished."
+          : scenario === "stall-recovery"
+            ? "Partial response.\n\nRequired checks finished."
+            : "First response.");
+      }
+      if (scenario === "stall-recovery") {
+        expect(tokens[1]).toBe(tokens[0]);
+        expect(prompts[1]).toContain("stopped making observable progress");
+        expect(prompts[1]).not.toContain("Inspect the project");
       }
       // Re-observing an accepted native request replays its journal, never a browser submission.
       if (scenario !== "cancel") await adapter.runTurn!(request, { headers: new Headers() }, () => {});

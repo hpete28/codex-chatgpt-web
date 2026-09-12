@@ -125,6 +125,14 @@ export const CHATGPT_MULTIPART_RESPONSE_DOM_GRACE_MS = 180_000;
 export const CHATGPT_EMPTY_RESPONSE_GRACE_MS = 10_000;
 export const CHATGPT_COMPLETION_ACTION_GRACE_MS = 60_000;
 export const CHATGPT_COMPLETION_SETTLE_MS = 2_000;
+/**
+ * A running ChatGPT response that produces no visible answer/trace progress and has no native tool
+ * work in flight is not useful liveness. Keep this comfortably below the native Codex request
+ * boundary so a wedged browser generation can be stopped and resumed in its retained conversation
+ * instead of consuming the rest of the outer turn.
+ */
+export const CHATGPT_RUNNING_RESPONSE_STALL_MS = 8 * 60_000;
+export const CHATGPT_STALLED_RESPONSE_STOP_GRACE_MS = 15_000;
 export const CHATGPT_TOOL_CONFIRMATION_TIMEOUT_MS = 60_000;
 export const MAX_CHATGPT_CONNECTOR_TRIGGER_ATTEMPTS = 3;
 const CHATGPT_CONNECTOR_MENTION_QUERY = "@codex";
@@ -1198,6 +1206,8 @@ export interface BrowserTurn {
   onSendActivated?: () => void | Promise<void>;
   /** Semantic submission evidence proved that ChatGPT accepted the prompt. */
   onSubmitted?: () => void;
+  /** The bridge deliberately stopped a wedged generation so the retained conversation can resume it. */
+  onStalledResponseStopped?: () => void;
   /** One inert Bigger Context stage completed its exact acknowledgement boundary. */
   onMultipartStageAcknowledged?: (stageIndex: number) => void | Promise<void>;
   /** Visible ChatGPT reasoning-summary step titles only; never hidden chain-of-thought. */
@@ -1479,6 +1489,41 @@ export class ChatGptCompletionTracker {
       return false;
     }
     return now - this.candidate.since >= this.stableMs;
+  }
+}
+
+export class ChatGptRunningResponseStallTracker {
+  private signature?: string;
+  private lastProgressAt?: number;
+
+  constructor(private readonly stallMs = CHATGPT_RUNNING_RESPONSE_STALL_MS) {}
+
+  update(state: {
+    responsePresent: boolean;
+    running: boolean;
+    currentText: string;
+    traceBlocks: readonly ChatGptVisibleTraceBlock[];
+    externalProgressLive?: boolean;
+    externalToolCallsInFlight?: boolean;
+  }, now = Date.now()): boolean {
+    if (!state.responsePresent
+      || !state.running
+      || state.externalProgressLive
+      || state.externalToolCallsInFlight) {
+      this.signature = undefined;
+      this.lastProgressAt = undefined;
+      return false;
+    }
+    const signature = `${state.currentText}\0${state.traceBlocks
+      .map(block => `${block.kind}:${block.key ?? ""}:${block.text}`)
+      .join("\0")}`;
+    if (signature !== this.signature) {
+      this.signature = signature;
+      this.lastProgressAt = now;
+      return false;
+    }
+    this.lastProgressAt ??= now;
+    return now - this.lastProgressAt >= this.stallMs;
   }
 }
 
@@ -4868,7 +4913,11 @@ export class ChatGptBrowserWorker {
         });
       };
       const domHealthTracker = new ChatGptTurnDomHealthTracker();
+      const runningStallTracker = new ChatGptRunningResponseStallTracker();
       const responseDomCache: ChatGptResponseDomCache = {};
+      let stalledResponseStopRequestedAt: number | undefined;
+      let stalledResponseStoppedAt: number | undefined;
+      let stalledResponseRecovery = false;
       let consecutiveObservationRebinds = 0;
       let internalObservationFaults = 0;
       let observedThisIteration = false;
@@ -4952,7 +5001,7 @@ export class ChatGptBrowserWorker {
             continue;
           }
         }
-        if (snapshot.stoppedThinkingVisible) throw chatGptStoppedThinkingError();
+        if (snapshot.stoppedThinkingVisible && !stalledResponseRecovery) throw chatGptStoppedThinkingError();
         if (snapshot.responsePresent) consecutiveObservationRebinds = 0;
         // The page was read successfully, so the fault budget is genuinely consecutive even when
         // this iteration goes on to `continue` for a rebind, confirmation, or liveness pause.
@@ -4986,6 +5035,46 @@ export class ChatGptBrowserWorker {
         const stop = page.locator(CHATGPT_STOP_BUTTON_SELECTOR).last();
         const running = await stop.isVisible().catch(() => false);
         if (running) sawRunning = true;
+        const observedAt = Date.now();
+        const responseStalled = runningStallTracker.update({
+          responsePresent: snapshot.responsePresent,
+          running,
+          currentText: snapshot.visibleText,
+          traceBlocks: snapshot.traceBlocks,
+          externalProgressLive,
+          externalToolCallsInFlight,
+        }, observedAt);
+        if (!stalledResponseRecovery && responseStalled && turn.onStalledResponseStopped) {
+          stalledResponseRecovery = true;
+          stalledResponseStopRequestedAt = observedAt;
+          await diagnostics.capture(page, "response-stalled-recovery");
+          console.warn(
+            `[chatgpt-web] browser turn ${turn.traceId} stopped a running response after ${CHATGPT_RUNNING_RESPONSE_STALL_MS}ms without observable progress; preserving the retained conversation for continuation`,
+          );
+          turn.onCommentary?.(
+            "The ChatGPT browser response stopped making progress. I stopped only that stalled generation and will continue the same Codex task in the retained conversation without replaying completed tool work.",
+            true,
+          );
+          await stop.press("Enter", { timeout: 3_000 });
+          responseDomCache.key = undefined;
+          responseDomCache.snapshot = undefined;
+          await new Promise(resolveSleep => setTimeout(resolveSleep, CHATGPT_UI_SETTLE_MS));
+          continue;
+        }
+        if (stalledResponseRecovery) {
+          if (running) {
+            stalledResponseStoppedAt = undefined;
+            if (stalledResponseStopRequestedAt !== undefined
+              && observedAt - stalledResponseStopRequestedAt >= CHATGPT_STALLED_RESPONSE_STOP_GRACE_MS) {
+              throw new ChatGptWebAdapterError(
+                "ChatGPT stopped producing output and did not stop its wedged generation when recovery was requested.",
+                { status: 502, errorType: "server_error", code: "chatgpt_stalled_response_stop_failed", retryable: false },
+              );
+            }
+          } else {
+            stalledResponseStoppedAt ??= observedAt;
+          }
+        }
         if (snapshot.responsePresent) {
           if (!capturedResponse) {
             capturedResponse = true;
@@ -5011,7 +5100,12 @@ export class ChatGptBrowserWorker {
             externalProgressLive,
           });
           if (domError) throw new Error(domError);
-          const completionReady = completionTracker.update({
+          const stalledRecoveryReady = stalledResponseRecovery
+            && !running
+            && stalledResponseStoppedAt !== undefined
+            && observedAt - stalledResponseStoppedAt >= CHATGPT_COMPLETION_SETTLE_MS
+            && !externalToolCallsInFlight;
+          const completionReady = stalledRecoveryReady || completionTracker.update({
             responsePresent: snapshot.responsePresent,
             running,
             currentText: snapshot.visibleText,
@@ -5021,7 +5115,10 @@ export class ChatGptBrowserWorker {
           });
           if (!completionReady) completionFenceRevision = undefined;
           if (completionReady) {
-            if (turn.completionFence) {
+            // A forced stall stop is an interrupted browser segment, not native task completion.
+            // Keep the broker capability open so the retained recovery segment can continue with
+            // the same turn token and only fence the genuinely terminal segment.
+            if (turn.completionFence && !stalledRecoveryReady) {
               if (completionFenceRevision === undefined) {
                 const revision = await turn.completionFence.begin();
                 if (revision === undefined) {
@@ -5068,6 +5165,7 @@ export class ChatGptBrowserWorker {
             } else {
               finalText = final.markdown;
             }
+            if (stalledRecoveryReady) turn.onStalledResponseStopped?.();
             break;
           }
           if (!loggedCompletionWait && Date.now() - sentAt >= 60_000) {

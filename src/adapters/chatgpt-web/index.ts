@@ -22,7 +22,7 @@ import type { ProviderAdapter } from "../base";
 import { parseDataUrl } from "../image";
 import { ChatGptWebAdapterError } from "./adapter-error";
 import { ChatGptBrowserWorker, type BrowserTurn } from "./browser-worker";
-import { workContinuationPrompt } from "./work-state";
+import { stalledResponseContinuationPrompt, workContinuationPrompt } from "./work-state";
 import { extractChatGptTurnEnvironment, extractChatGptTurnIdentity, priorChatGptAbortedTurnIds } from "./environment";
 import { CHATGPT_WEB_LUNA_MODEL_ID, resolveChatGptWebModelMode, type ChatGptWebCapabilities } from "./model";
 import { chatGptReadOnlyContextWarning, compileChatGptWebPrompt, type CompileChatGptWebPromptOptions } from "./prompt";
@@ -365,6 +365,8 @@ function currentCodexThreadReaderWireName(parsed: CodexParsedRequest): string | 
 
 /** Keep the Responses bridge alive during every awaited phase of a browser turn. */
 export const CHATGPT_WEB_ADAPTER_HEARTBEAT_MS = 10_000;
+/** Bound same-conversation recovery so an unhealthy ChatGPT surface cannot consume a whole native turn. */
+export const MAX_CHATGPT_STALLED_RESPONSE_RECOVERIES = 2;
 
 export function createChatGptWebAdapter(
   provider: CodexProviderConfig,
@@ -847,6 +849,10 @@ export function createChatGptWebAdapter(
         throw error;
       }
     };
+    let stalledResponseStopped = false;
+    const markStalledResponseStopped = (): void => {
+      stalledResponseStopped = true;
+    };
     const initialBrowserTurn: BrowserTurn = {
       traceId,
       modelId: parsed.modelId,
@@ -862,6 +868,7 @@ export function createChatGptWebAdapter(
       ...(parsed._compactionRequest ? { compaction: true } : {}),
       ...submissionLifecycle,
       ...multipartProgressLifecycle,
+      ...(workContinuation ? { onStalledResponseStopped: markStalledResponseStopped } : {}),
       onReasoningSummary: (text, continuation) => trace.push({ kind: "reasoning", text, ...(continuation ? { continuation: true } : {}) }),
       onCommentary: (text, continuation) => trace.push({ kind: "commentary", text, ...(continuation ? { continuation: true } : {}) }),
       onTextDelta: delta => text.push(delta),
@@ -878,23 +885,15 @@ export function createChatGptWebAdapter(
     const runBrowserMessages = async (): Promise<string> => {
       let nextTurn = initialBrowserTurn;
       let answer = "";
-      for (;;) {
-        const segment = await worker.run(nextTurn);
-        answer += (answer && segment ? "\n\n" : "") + segment;
-        if (browserAbort.signal.aborted) throw browserAbort.signal.reason ?? new DOMException("ChatGPT web turn aborted", "AbortError");
-        const continuation = workContinuation && activeToken
-          ? await broker.continueCompletedTurn!(activeToken)
-          : undefined;
-        if (!continuation) return answer;
-        // worker.run includes physical browser settlement and the launcher retain acknowledgement.
-        // Never fall back to a fresh chat or recompile/replay the accepted native request.
-        const prepareContinuation = async () => {
-          if (browserAbort.signal.aborted) throw browserAbort.signal.reason ?? new DOMException("ChatGPT web turn aborted", "AbortError");
-          return { text: workContinuationPrompt(continuation.turnToken, continuation.state), images: [], release: () => {} };
-        };
+      let stalledRecoveries = 0;
+      let browserCapabilityToken: string | undefined;
+      const retainedTurn = (
+        prepareResume: NonNullable<BrowserTurn["prepareResume"]>,
+        commentary: string,
+      ): BrowserTurn => {
         let firstDelta = true;
-        trace.push({ kind: "commentary", text: "The Web response ended with required work recorded as remaining. Continuing in the retained conversation." });
-        nextTurn = {
+        trace.push({ kind: "commentary", text: commentary });
+        return {
           traceId,
           modelId: parsed.modelId,
           reasoning: parsed.options.reasoning,
@@ -902,13 +901,14 @@ export function createChatGptWebAdapter(
           conversationKey,
           retainConversation: true,
           requireRetainedConversation: true,
-          prepare: async () => { throw new Error("Work continuation requires its exact retained conversation"); },
-          prepareResume: prepareContinuation,
+          prepare: async () => { throw new Error("Retained continuation requires its exact retained conversation"); },
+          prepareResume,
           abortSignal: browserAbort.signal,
           externalProgress,
           completionFence: initialBrowserTurn.completionFence,
           onReasoningSummary: initialBrowserTurn.onReasoningSummary,
           onCommentary: initialBrowserTurn.onCommentary,
+          onStalledResponseStopped: markStalledResponseStopped,
           onTextDelta: delta => {
             if (!delta) return;
             if (firstDelta && text.value()) text.push("\n\n");
@@ -916,6 +916,53 @@ export function createChatGptWebAdapter(
             text.push(delta);
           },
         };
+      };
+      for (;;) {
+        const segment = await worker.run(nextTurn);
+        answer += (answer && segment ? "\n\n" : "") + segment;
+        if (browserAbort.signal.aborted) throw browserAbort.signal.reason ?? new DOMException("ChatGPT web turn aborted", "AbortError");
+        browserCapabilityToken ??= activeToken;
+
+        if (stalledResponseStopped) {
+          stalledResponseStopped = false;
+          stalledRecoveries += 1;
+          if (!workContinuation || !conversationKey || !browserCapabilityToken) {
+            throw new ChatGptWebAdapterError(
+              "ChatGPT stopped producing output and this turn cannot safely resume the interrupted response in a retained conversation.",
+              { status: 502, errorType: "server_error", code: "chatgpt_stalled_response_unrecoverable", retryable: false },
+            );
+          }
+          if (stalledRecoveries > MAX_CHATGPT_STALLED_RESPONSE_RECOVERIES) {
+            throw new ChatGptWebAdapterError(
+              `ChatGPT stopped producing output after ${MAX_CHATGPT_STALLED_RESPONSE_RECOVERIES} safe same-conversation recovery attempts.`,
+              { status: 502, errorType: "server_error", code: "chatgpt_stalled_response_exhausted", retryable: false },
+            );
+          }
+          const recoveryToken = browserCapabilityToken;
+          nextTurn = retainedTurn(
+            async () => {
+              if (browserAbort.signal.aborted) throw browserAbort.signal.reason ?? new DOMException("ChatGPT web turn aborted", "AbortError");
+              return { text: stalledResponseContinuationPrompt(recoveryToken), images: [], release: () => {} };
+            },
+            `The Web response stalled without observable progress. Continuing the same native turn in its retained ChatGPT conversation (recovery ${stalledRecoveries}/${MAX_CHATGPT_STALLED_RESPONSE_RECOVERIES}).`,
+          );
+          continue;
+        }
+
+        const continuation = workContinuation && activeToken
+          ? await broker.continueCompletedTurn!(activeToken)
+          : undefined;
+        if (!continuation) return answer;
+        // worker.run includes physical browser settlement and the launcher's exact retain acknowledgement.
+        // Never fall back to a fresh chat or recompile/replay the accepted native request.
+        browserCapabilityToken = continuation.turnToken;
+        nextTurn = retainedTurn(
+          async () => {
+            if (browserAbort.signal.aborted) throw browserAbort.signal.reason ?? new DOMException("ChatGPT web turn aborted", "AbortError");
+            return { text: workContinuationPrompt(continuation.turnToken, continuation.state), images: [], release: () => {} };
+          },
+          "The Web response ended with required work recorded as remaining. Continuing in the retained conversation.",
+        );
       }
     };
     const browserTurn = cancellableBrowserTurn(trackBrowserOwner(finalizeCheckpoint(runBrowserMessages())), browserAbort);

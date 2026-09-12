@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createContext, runInContext } from "node:vm";
 import type { Page } from "playwright-core";
-import { CHATGPT_BROWSER_OBSERVATION_PROBE_TIMEOUT_MS, CHATGPT_COMPLETION_SETTLE_MS, CHATGPT_EXTERNAL_PROGRESS_CLOCK_SKEW_MS, CHATGPT_EXTERNAL_PROGRESS_STALL_CEILING_MS, ChatGptCompletionTracker, chatGptExternalProgressSuppressesDomHealth, CHATGPT_RESPONSE_DOM_GRACE_MS, MAX_CHATGPT_INTERNAL_OBSERVATION_FAULTS, CHATGPT_COMPOSER_DOCUMENT_END_KEY, CHATGPT_COMPOSER_SELECT_ALL_KEY, ChatGptBrowserObservationTimeoutError, ChatGptBrowserWorker, ChatGptPromptAttachmentIntegrityError, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_PAGE_REBINDS, MAX_CHATGPT_BROWSER_TABS, MAX_CHATGPT_CONNECTOR_TRIGGER_ATTEMPTS, assertChatGptWebInputWithinLimits, assertChatGptWebMultipartInputWithinLimits, browserDiagnosticCheckpoint, chatGptConnectorAttachmentMode, chatGptNewTurnIdentity, chatGptReboundTurnIdentity, chatGptSubmissionEvidence, connectAfterClosingBrowserConnection, dismissChatGptTemporaryChatOnboarding, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, resolveChatGptWebMultipartStagingMode, sanitizeChatGptBrowserDiagnosticState, setChatGptThinkMode, stripChatGptTraceControlSuffix, throwIfChatGptRateLimitDialog, throwIfChatGptSessionFailureAlert, throwIfChatGptTerminalErrorAlert, withChatGptBrowserObservationTimeout, CHATGPT_MULTIPART_RESPONSE_DOM_GRACE_MS, browserStageTimeouts, ChatGptSuspensionClock, remainingStageBudgetMs } from "../src/adapters/chatgpt-web/browser-worker";
+import { CHATGPT_BROWSER_OBSERVATION_PROBE_TIMEOUT_MS, CHATGPT_COMPLETION_SETTLE_MS, CHATGPT_EXTERNAL_PROGRESS_CLOCK_SKEW_MS, CHATGPT_EXTERNAL_PROGRESS_STALL_CEILING_MS, ChatGptCompletionTracker, chatGptExternalProgressSuppressesDomHealth, CHATGPT_RESPONSE_DOM_GRACE_MS, MAX_CHATGPT_INTERNAL_OBSERVATION_FAULTS, CHATGPT_COMPOSER_DOCUMENT_END_KEY, CHATGPT_COMPOSER_SELECT_ALL_KEY, ChatGptBrowserObservationTimeoutError, ChatGptBrowserWorker, ChatGptPromptAttachmentIntegrityError, ChatGptRunningResponseStallTracker, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_PAGE_REBINDS, MAX_CHATGPT_BROWSER_TABS, MAX_CHATGPT_CONNECTOR_TRIGGER_ATTEMPTS, assertChatGptWebInputWithinLimits, assertChatGptWebMultipartInputWithinLimits, browserDiagnosticCheckpoint, chatGptConnectorAttachmentMode, chatGptNewTurnIdentity, chatGptReboundTurnIdentity, chatGptSubmissionEvidence, connectAfterClosingBrowserConnection, dismissChatGptTemporaryChatOnboarding, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, resolveChatGptWebMultipartStagingMode, sanitizeChatGptBrowserDiagnosticState, setChatGptThinkMode, stripChatGptTraceControlSuffix, throwIfChatGptRateLimitDialog, throwIfChatGptSessionFailureAlert, throwIfChatGptTerminalErrorAlert, withChatGptBrowserObservationTimeout, CHATGPT_MULTIPART_RESPONSE_DOM_GRACE_MS, browserStageTimeouts, ChatGptSuspensionClock, remainingStageBudgetMs } from "../src/adapters/chatgpt-web/browser-worker";
 import { ensureChatGptPersonalizedConnectorAccess, waitForOperationalChatGptViewport } from "../src/adapters/chatgpt-web/browser-worker";
 import { chatGptStoppedThinkingError } from "../src/adapters/chatgpt-web/adapter-error";
 import { CHATGPT_WEB_MODEL_ID } from "../src/adapters/chatgpt-web/model";
@@ -3529,6 +3529,37 @@ test("trace parsing removes an Answer now control appended to live reasoning", (
   });
 });
 
+test("running response stall tracking requires real inactivity and never competes with native tool work", () => {
+  const tracker = new ChatGptRunningResponseStallTracker(1_000);
+  const base = {
+    responsePresent: true,
+    running: true,
+    currentText: "partial",
+    traceBlocks: [{ kind: "commentary" as const, text: "working" }],
+  };
+
+  expect(tracker.update(base, 1_000)).toBeFalse();
+  expect(tracker.update(base, 1_999)).toBeFalse();
+  expect(tracker.update(base, 2_000)).toBeTrue();
+
+  // Any visible answer/trace progress restarts the budget.
+  expect(tracker.update({ ...base, currentText: "partial more" }, 2_100)).toBeFalse();
+  expect(tracker.update({ ...base, currentText: "partial more" }, 3_099)).toBeFalse();
+  expect(tracker.update({ ...base, currentText: "partial more" }, 3_100)).toBeTrue();
+  expect(tracker.update({ ...base, currentText: "partial more", traceBlocks: [{ kind: "commentary" as const, text: "still working" }] }, 3_200)).toBeFalse();
+
+  // Proven native activity is stronger liveness than an unchanged browser projection.
+  expect(tracker.update({ ...base, externalProgressLive: true }, 10_000)).toBeFalse();
+  expect(tracker.update(base, 10_100)).toBeFalse();
+  expect(tracker.update(base, 11_100)).toBeTrue();
+  expect(tracker.update({ ...base, externalToolCallsInFlight: true }, 20_000)).toBeFalse();
+  expect(tracker.update(base, 20_100)).toBeFalse();
+
+  // A normal terminal projection clears the running-stall budget.
+  expect(tracker.update({ ...base, running: false }, 30_000)).toBeFalse();
+  expect(tracker.update(base, 30_100)).toBeFalse();
+});
+
 test("browser DOM health fails closed on a vanished or empty ChatGPT response", () => {
   const missing = new ChatGptTurnDomHealthTracker(1_000, 500);
   const absent = {
@@ -3663,13 +3694,18 @@ test("the launcher helper transport carries MCP progress into the out-of-process
 
 test("both response loops check explicit Stopped thinking before acknowledging further MCP work", () => {
   const worker = readFileSync("src/adapters/chatgpt-web/browser-worker.ts", "utf8");
-  for (const method of ["private async waitForMultipartAcknowledgement(", "private async runBrowserTurn("]) {
-    const loop = worker.slice(worker.indexOf(method));
-    const failure = loop.indexOf("if (snapshot.stoppedThinkingVisible) throw chatGptStoppedThinkingError();");
-    const acknowledgement = loop.indexOf(".acknowledgeToolBatch(", failure);
-    expect(failure).toBeGreaterThan(0);
-    expect(acknowledgement).toBeGreaterThan(failure);
-  }
+  const multipartLoop = worker.slice(worker.indexOf("private async waitForMultipartAcknowledgement("));
+  const multipartFailure = multipartLoop.indexOf("if (snapshot.stoppedThinkingVisible) throw chatGptStoppedThinkingError();");
+  const multipartAcknowledgement = multipartLoop.indexOf(".acknowledgeToolBatch(", multipartFailure);
+  expect(multipartFailure).toBeGreaterThan(0);
+  expect(multipartAcknowledgement).toBeGreaterThan(multipartFailure);
+
+  const responseLoop = worker.slice(worker.indexOf("private async runBrowserTurn("));
+  const responseFailure = responseLoop.indexOf("if (snapshot.stoppedThinkingVisible && !stalledResponseRecovery) throw chatGptStoppedThinkingError();");
+  const responseAcknowledgement = responseLoop.indexOf(".acknowledgeToolBatch(", responseFailure);
+  expect(responseFailure).toBeGreaterThan(0);
+  expect(responseAcknowledgement).toBeGreaterThan(responseFailure);
+  expect(responseLoop).toContain("stalledResponseRecovery");
   expect((worker.match(/domHealthTracker\.clearMissingResponse\(\)/g) ?? []).length).toBe(2);
 });
 
