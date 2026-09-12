@@ -324,13 +324,14 @@ test("manual ChatGPT navigation still fails closed on a real load failure", asyn
   assert.equal(observed.logs.some(([, event]) => event === "browser.manual_tab_navigation_failed"), true);
 });
 
-test("primary browser initialization keeps its view offscreen but visible until ownership is committed", async () => {
+test("primary browser initialization keeps its hidden renderer schedulable without inspecting the idle DOM", async () => {
   const calls = [];
   let currentUrl = "about:blank";
   const contents = new EventEmitter();
   contents.isDestroyed = () => false;
   contents.getURL = () => currentUrl;
   contents.stop = () => calls.push("stop");
+  contents.setBackgroundThrottling = enabled => calls.push(["throttling", enabled]);
   contents.loadURL = async (url) => {
     calls.push(["load", url]);
     currentUrl = url;
@@ -343,7 +344,7 @@ test("primary browser initialization keeps its view offscreen but visible until 
       webContents: contents,
     },
     hiddenTurnBounds: () => hiddenBounds,
-    markOwnedSurface: async () => calls.push("owned"),
+    markOwnedSurface: async () => assert.fail("idle startup must not inspect the DOM"),
     syncViewVisibility: () => calls.push("sync"),
     writeDescriptor: () => calls.push("descriptor"),
     logger: { info: (event, detail) => calls.push([event, detail]) },
@@ -354,11 +355,44 @@ test("primary browser initialization keeps its view offscreen but visible until 
   assert.deepEqual(calls, [
     ["bounds", hiddenBounds],
     ["visible", true],
+    ["throttling", false],
     ["load", IDLE_BROWSER_URL],
-    "owned",
+    ["throttling", true],
     "sync",
     "descriptor",
     ["browser.initialized", { url: IDLE_BROWSER_URL }],
+  ]);
+});
+
+test("an idle home load never starts DOM ownership or authentication work", async () => {
+  const calls = [];
+  const contents = new EventEmitter();
+  contents.getURL = () => IDLE_BROWSER_URL;
+  contents.setWindowOpenHandler = () => {};
+  const fixture = Object.assign(Object.create(BrowserHost.prototype), {
+    view: { webContents: contents },
+    turnTabs: new Map(),
+    manualOperation: null,
+    getBrowserInteractionMode: () => "automatic",
+    clearHomeNavigationTimeout: () => calls.push("clear-timeout"),
+    setState: patch => calls.push(["state", patch]),
+    applyViewportCss: async () => calls.push("css"),
+    markOwnedSurface: async () => calls.push("owned"),
+    probeAuthentication: async () => calls.push("probe"),
+    logger: {
+      info: (event, detail) => calls.push(["info", event, detail]),
+      warn: (event, detail) => calls.push(["warn", event, detail]),
+      error: (event, detail) => calls.push(["error", event, detail]),
+    },
+  });
+
+  BrowserHost.prototype.bindWebContents.call(fixture);
+  contents.emit("did-finish-load");
+  await new Promise(resolve => setImmediate(resolve));
+
+  assert.deepEqual(calls, [
+    "clear-timeout",
+    ["state", { url: IDLE_BROWSER_URL, loading: false }],
   ]);
 });
 

@@ -467,16 +467,18 @@ class BrowserHost {
   }
 
   async initializePrimaryView() {
+    const contents = this.view.webContents;
     this.view.setBounds(this.hiddenTurnBounds());
     this.view.setVisible(true);
+    contents.setBackgroundThrottling(false);
     try {
-      await loadPrimaryBrowserSurface(this.view.webContents, this.logger);
-      if (browserInteractionModeFor(this) === "automatic") await this.markOwnedSurface();
+      await loadPrimaryBrowserSurface(contents, this.logger);
     } finally {
+      contents.setBackgroundThrottling(true);
       this.syncViewVisibility();
     }
     this.writeDescriptor();
-    this.logger.info("browser.initialized", { url: this.view.webContents.getURL() });
+    this.logger.info("browser.initialized", { url: contents.getURL() });
   }
 
   currentOperation() {
@@ -1048,6 +1050,7 @@ class BrowserHost {
         return;
       }
       this.setState({ url, loading: false });
+      if (url === IDLE_BROWSER_URL) return;
       void this.applyViewportCss();
       void this.markOwnedSurface()
         .then(() => this.probeAuthentication())
