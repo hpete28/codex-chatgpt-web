@@ -155,6 +155,41 @@ test("launcher turn control sends authenticated lifecycle events", async () => {
   }
 });
 
+test("launcher turn control retries a transient start transport failure", async () => {
+  let attempts = 0;
+  const server = createServer(async (request, response) => {
+    for await (const _chunk of request) { /* drain request */ }
+    attempts += 1;
+    if (attempts === 1) {
+      request.socket.destroy();
+      return;
+    }
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end('{"ok":true,"surfaceId":"launcher_surface_id_0123456789AB","reused":false,"connectorBound":false}\n');
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  try {
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("test server has no port");
+    const path = descriptorFile(`http://127.0.0.1:${address.port}`);
+    await expect(notifyLauncherTurn(path, {
+      phase: "start",
+      traceId: "retry123456",
+      helperPid: process.pid,
+    }, 1_000)).resolves.toEqual({
+      surfaceId: "launcher_surface_id_0123456789AB",
+      reused: false,
+      connectorBound: false,
+    });
+    expect(attempts).toBe(2);
+  } finally {
+    await new Promise<void>(resolve => server.close(() => resolve()));
+  }
+});
+
 test("launcher retained-conversation release uses its authenticated exact-key endpoint", async () => {
   let received: { url?: string; authorization?: string; body?: unknown } = {};
   const server = createServer(async (request, response) => {
