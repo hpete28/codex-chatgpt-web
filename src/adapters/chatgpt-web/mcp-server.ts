@@ -215,12 +215,39 @@ export function chatGptMcpInvocationTimeout(
   return Math.min(CHATGPT_WEB_MCP_INVOCATION_TIMEOUT_MS, remaining);
 }
 
-function asMcpResult(value: BrokerToolResult) {
+function brokerToolErrorMessage(value: BrokerToolResult): string | undefined {
+  if (!value.isError) return undefined;
+  const message = value.content
+    .filter((part): part is { type: "text"; text: string } => (
+      Boolean(part)
+      && typeof part === "object"
+      && !Array.isArray(part)
+      && (part as { type?: unknown }).type === "text"
+      && typeof (part as { text?: unknown }).text === "string"
+    ))
+    .map(part => part.text.replace(/\s+/g, " ").trim())
+    .filter(Boolean)
+    .join(" | ")
+    .slice(0, 2_000);
+  return message || undefined;
+}
+
+function asMcpResult(value: BrokerToolResult, diagnosticToolName?: string) {
+  const nativeErrorMessage = brokerToolErrorMessage(value);
+  const structuredContent = value.structuredContent !== undefined
+    && value.structuredContent !== null
+    && typeof value.structuredContent === "object"
+      ? value.structuredContent as Record<string, unknown>
+      : nativeErrorMessage && diagnosticToolName
+        ? {
+          code: "codex_native_tool_error",
+          tool: diagnosticToolName,
+          message: nativeErrorMessage,
+        }
+        : undefined;
   return {
     content: value.content as never,
-    ...(value.structuredContent !== undefined && value.structuredContent !== null && typeof value.structuredContent === "object"
-      ? { structuredContent: value.structuredContent as Record<string, unknown> }
-      : {}),
+    ...(structuredContent ? { structuredContent } : {}),
     ...(value.isError ? { isError: true } : {}),
     ...(value._meta !== undefined && value._meta !== null && typeof value._meta === "object"
       ? { _meta: value._meta as Record<string, unknown> }
@@ -549,6 +576,7 @@ export async function runChatGptMcpServer(options: {
     tool: CodexTool,
     payload: { arguments?: Record<string, unknown>; input?: string },
     signal?: AbortSignal,
+    diagnosticToolName = wireName(tool),
   ) => {
     const timeoutMs = chatGptMcpInvocationTimeout(bound);
     try {
@@ -559,8 +587,15 @@ export async function runChatGptMcpServer(options: {
         freeform: tool.freeform === true,
         ...(tool.freeform ? { input: payload.input ?? "" } : { arguments: payload.arguments ?? {} }),
       }, timeoutMs, signal);
-      return asMcpResult(response);
+      if (response.isError) {
+        const message = brokerToolErrorMessage(response) ?? "native tool returned an error without text detail";
+        console.error(`[chatgpt-web-mcp] native tool failure tool=${diagnosticToolName}: ${message}`);
+      }
+      return asMcpResult(response, diagnosticToolName);
     } catch (error) {
+      if (!(error instanceof TurnBrokerTimeoutError)) {
+        console.error(`[chatgpt-web-mcp] native tool invocation failed before result tool=${diagnosticToolName}:`, error);
+      }
       // A cancelled/timed-out MCP request no longer has a consumer for the native result. Revoke
       // the whole turn capability so the broker drops the pending invocation and every later call
       // from that abandoned ChatGPT response fails explicitly against its retired binding.
@@ -606,7 +641,7 @@ export async function runChatGptMcpServer(options: {
     }
     return invoke(bindingId, bound, gateway, {
       input: execGatewayProgram(nestedToolName, freeform, payload, bound.tools.map(wireName)),
-    }, signal);
+    }, signal, nestedToolName);
   };
 
   server.registerTool(
@@ -896,7 +931,7 @@ export async function runChatGptMcpServer(options: {
             input: execGatewayProgram(wire_name, input !== undefined, {
               ...(input !== undefined ? { input } : { arguments: invocationArguments }),
             }, bound.tools.map(wireName)),
-          }, extra.signal);
+          }, extra.signal, wire_name);
         }
         if (tool.freeform) {
           if (input === undefined) throw new Error(`Freeform Codex tool ${wire_name} requires input`);

@@ -261,6 +261,40 @@ function brokerResultText(result: BrokerToolResult): string {
   return result.structuredContent === undefined ? "" : JSON.stringify(result.structuredContent);
 }
 
+function compactionHandoffFailureDetail(error: unknown): string | undefined {
+  const normalize = (message: string): string => message
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/[.!?]+$/, "")
+    .slice(0, 600);
+  const visit = (candidate: unknown): string | undefined => {
+    if (candidate instanceof AggregateError) {
+      for (const nested of candidate.errors) {
+        const detail = visit(nested);
+        if (detail) return detail;
+      }
+      return undefined;
+    }
+    if (candidate instanceof ChatGptWebAdapterError) {
+      const detail = normalize(candidate.message);
+      return detail || undefined;
+    }
+    if (candidate instanceof Error && candidate.message.startsWith("ChatGPT ")) {
+      const detail = normalize(candidate.message);
+      return detail || undefined;
+    }
+    return undefined;
+  };
+  return visit(error);
+}
+
+function compactionHandoffFailureMessage(error: unknown): string {
+  const detail = compactionHandoffFailureDetail(error);
+  return detail
+    ? `ChatGPT did not complete the context handoff: ${detail}. Retry the task.`
+    : "ChatGPT did not complete the context handoff. Retry the task.";
+}
+
 function emitToolBatch(requests: BrokerToolRequest[], usage: CodexUsage, emit: (event: AdapterEvent) => void): void {
   for (const request of requests) {
     emit({ type: "tool_call_start", id: request.callId, name: request.wireName });
@@ -1302,7 +1336,7 @@ export function createChatGptWebAdapter(
               console.error("[chatgpt-web] structured context handoff failed:", handoffError);
               emit({
                 type: "error",
-                message: "ChatGPT did not complete the context handoff. Retry the task.",
+                message: compactionHandoffFailureMessage(handoffError),
                 status: 409,
                 errorType: "invalid_request_error",
                 code: "compaction_handoff_failed",

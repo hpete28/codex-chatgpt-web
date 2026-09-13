@@ -3461,6 +3461,21 @@ describe("ChatGPT outer-native harness v4", () => {
       broker.completeTool(token, applyRequest!.callId, toolResult({ output: "Done!" }));
       expect((await apply).structuredContent).toEqual({ output: "Done!" });
 
+      const deniedPatch = "*** Begin Patch\n*** Add File: denied-token.txt\n+blocked\n*** End Patch";
+      const deniedApply = call("codex_apply_patch", { turn_token: token, patch: deniedPatch });
+      const [deniedApplyRequest] = await broker.nextToolBatch(token);
+      broker.completeTool(token, deniedApplyRequest!.callId, {
+        content: [{ type: "text", text: "Mutation rejected before execution by host policy" }],
+        isError: true,
+      });
+      const deniedApplyResult = await deniedApply;
+      expect(deniedApplyResult.isError).toBeTrue();
+      expect(deniedApplyResult.structuredContent).toEqual({
+        code: "codex_native_tool_error",
+        tool: "apply_patch",
+        message: "Mutation rejected before execution by host policy",
+      });
+
       const view = call("codex_view_image", {
         turn_token: token,
         path: "/private/tmp/direct-token.png",
