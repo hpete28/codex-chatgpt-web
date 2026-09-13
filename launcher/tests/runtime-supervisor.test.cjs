@@ -839,8 +839,46 @@ test("non-zero tunnel connect can remain in the bounded readiness path while the
   supervisor.startTunnelMonitor = () => { events.push("monitor"); };
   try {
     await supervisor.startTunnel(config);
-    assert.deepEqual(events.slice(-4), ["runtime.tunnel_connect_starting", "waitForTunnel", "mcp", "monitor"]);
+    assert.deepEqual(events.slice(-4), ["runtime.tunnel_connect_nonzero_accepted", "waitForTunnel", "mcp", "monitor"]);
     assert.equal(supervisor.tunnel?.pid, 123_456_700);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("non-zero tunnel connect that already reports ready continues to MCP verification", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-tunnel-connect-ready-"));
+  const events = [];
+  const supervisor = new RuntimeSupervisor({
+    app: { getVersion: () => "0.2.0", isPackaged: false },
+    logger: { info: (event) => events.push(event), warn() {}, error() {} },
+    sourceRoot: root,
+    coreHome: root,
+    browserDescriptorPath: path.join(root, "launcher.json"),
+  });
+  const config = { mode: "full", tunnel: { alias: "owned-test" } };
+  supervisor.assertTunnelClientReady = () => {};
+  supervisor.waitForKnownTunnelStatus = async () => ({ ready: false });
+  supervisor.runTunnelStopCommand = async () => ({ code: 1, output: "alias owned-test is not known" });
+  supervisor.runTunnelConnectCommand = async () => ({
+    code: 1,
+    stdout: JSON.stringify({ runtime_state: "ready", process_running: true, healthy: true, ready: true }),
+    stderr: "",
+    output: "synthetic non-zero ready result",
+  });
+  supervisor.waitForTunnel = async (_config, timeoutMs, operationName) => {
+    assert.equal(timeoutMs, TUNNEL_START_TIMEOUT_MS);
+    assert.equal(operationName, "runtime-start");
+    events.push("waitForTunnel");
+    supervisor.tunnel = { pid: 123_456_702, exitCode: null, signalCode: null, managed: true };
+    return { ready: true, pid: 123_456_702 };
+  };
+  supervisor.waitForTunnelMcpTransport = async () => { events.push("mcp"); };
+  supervisor.startTunnelMonitor = () => { events.push("monitor"); };
+  try {
+    await supervisor.startTunnel(config);
+    assert.deepEqual(events.slice(-4), ["runtime.tunnel_connect_nonzero_accepted", "waitForTunnel", "mcp", "monitor"]);
+    assert.equal(supervisor.tunnel?.pid, 123_456_702);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
@@ -865,6 +903,18 @@ test("non-zero tunnel connect still fails closed for terminal or malformed state
       stdout: JSON.stringify({ runtime_state: "starting", process_running: true, error: "invalid configuration" }),
       stderr: "",
       output: "fatal starting result",
+    },
+    {
+      code: 1,
+      stdout: JSON.stringify({ runtime_state: "ready", process_running: true, healthy: false, ready: true }),
+      stderr: "",
+      output: "inconsistent ready result",
+    },
+    {
+      code: 1,
+      stdout: JSON.stringify({ runtime_state: "ready", process_running: true, healthy: true, ready: true, remote_error: "control plane rejected startup" }),
+      stderr: "",
+      output: "ready result with explicit error",
     },
   ]) {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-tunnel-connect-terminal-"));
