@@ -1507,6 +1507,47 @@ test("structured compact rebuilds canonical context when its retained browser di
   }
 });
 
+test("fresh compaction surfaces the specific ChatGPT attachment failure", async () => {
+  const root = mkdtempSync(join(shortSocketTempRoot(), "cgw-fresh-compact-attachment-error-"));
+  const provider: CodexProviderConfig = {
+    adapter: "chatgpt-web",
+    baseUrl: `browser://fresh-compact-attachment-error-${Date.now()}`,
+    chatgptWeb: {
+      browserHost: "launcher",
+      browserHostDescriptorPath: join(root, "launcher.json"),
+      brokerSocketPath: defaultBrokerEndpoint(root),
+      localToolsEnabled: true,
+      solAvailable: true,
+      proAvailable: true,
+    },
+  };
+  const worker = ChatGptBrowserWorker.forProvider(provider);
+  const originalRun = worker.run.bind(worker);
+  (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = async turn => {
+    expect(turn.requireRetainedConversation).toBeUndefined();
+    throw new Error("ChatGPT did not accept all prompt attachments: upload rejected");
+  };
+  const events: AdapterEvent[] = [];
+  try {
+    await createChatGptWebAdapter(provider).runTurn!(
+      request(true),
+      { headers: new Headers() },
+      event => events.push(event),
+    );
+    expect(events.at(-1)).toMatchObject({
+      type: "error",
+      code: "compaction_handoff_failed",
+      retryable: false,
+      message: "ChatGPT did not complete the context handoff: ChatGPT did not accept all prompt attachments: upload rejected. Retry the task.",
+    });
+  } finally {
+    (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = originalRun;
+    chatGptTurnSessions.clear();
+    await TurnBroker.forSocket(provider.chatgptWeb!.brokerSocketPath!).close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("a disappeared retained source cannot leave its fresh compaction rebuild past the shared deadline", async () => {
   const root = mkdtempSync(join(shortSocketTempRoot(), "cgw-stale-retained-deadline-"));
   const provider: CodexProviderConfig = {
@@ -1562,7 +1603,7 @@ test("a disappeared retained source cannot leave its fresh compaction rebuild pa
       type: "error",
       code: "compaction_handoff_failed",
       retryable: false,
-      message: "ChatGPT did not complete the context handoff. Retry the task.",
+      message: "ChatGPT did not complete the context handoff: ChatGPT compaction did not fully settle within 25ms. Retry the task.",
     });
   } finally {
     releaseBrowser?.();
