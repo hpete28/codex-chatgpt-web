@@ -1214,7 +1214,7 @@ test("a compact HTTP observer can reconnect without sending a second retained-ch
   }
 });
 
-test.each([false, true])("structured compact rebuilds canonical context when its retained source is absent (Bigger Context=%s)", async experimentalBiggerContext => {
+test.each([false, true])("structured compact rebuilds a bounded canonical context when its retained source is absent (Bigger Context=%s)", async experimentalBiggerContext => {
   const root = mkdtempSync(join(shortSocketTempRoot(), "cgw-missing-retained-compact-"));
   const provider: CodexProviderConfig = {
     adapter: "chatgpt-web",
@@ -1238,21 +1238,22 @@ test.each([false, true])("structured compact rebuilds canonical context when its
     expect(turn.conversationKey).toBeUndefined();
     expect(turn.compaction).toBeTrue();
     const prepared = await turn.prepare();
-    const contextText = prepared.multipart?.parts.join("\n") ?? prepared.text;
-    expect(contextText).toContain("Original task");
-    expect(contextText).toContain("Continue with the next step");
+    expect(prepared.multipart).toBeUndefined();
+    expect(prepared.text).toContain("Continue with the next step");
     if (experimentalBiggerContext) {
-      expect(prepared.multipart!.parts).toHaveLength(3);
-      expect(prepared.trimmedCompactionMessages).toBeUndefined();
-      const lastRecord = prepared.multipart!.parts.flatMap(part => JSON.parse(part).records).at(-1);
-      expect(lastRecord.message.content).toBe(compact.context.messages.at(-1)!.content);
+      expect(prepared.trimmedCompactionMessages).toBeGreaterThan(0);
+      expect(prepared.text).not.toContain("x".repeat(1_000));
+    } else {
+      expect(prepared.text).toContain("Original task");
     }
     prepared.release();
     return "Fallback checkpoint from canonical Codex context";
   };
   const compact = request(true);
   const events: AdapterEvent[] = [];
-  if (experimentalBiggerContext) compact.context.messages.at(-1)!.content += "x".repeat(160_000);
+  if (experimentalBiggerContext) {
+    compact.context.messages[0]!.content = `Original task ${"x".repeat(160_000)}`;
+  }
   try {
     await createChatGptWebAdapter(provider).runTurn!(
       compact,

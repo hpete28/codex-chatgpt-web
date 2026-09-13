@@ -424,7 +424,10 @@ export function createChatGptWebAdapter(
     environment: ReturnType<typeof extractChatGptTurnEnvironment> | undefined,
     traceId: string,
     turnCapabilities: ChatGptWebCapabilities,
-    hooks: { onCompactionProgress?: () => void } = {},
+    hooks: {
+      onCompactionProgress?: () => void;
+      boundedCompactionFallback?: boolean;
+    } = {},
   ): ChatGptTurnRuntime => {
     const manualRequest = isChatGptWebZeroRiskBackendModel(parsed.modelId);
     if (manualRequest !== manualInteraction) {
@@ -470,8 +473,9 @@ export function createChatGptWebAdapter(
     const compileOptionsFor = (input: CodexParsedRequest) => {
       if (manualRequest) return {};
       const experimentalMultipartParts = experimentalBiggerContext
-        ? resolveBiggerContextMultipartParts(input, turnCapabilities)
-        : undefined;
+        && !(hooks.boundedCompactionFallback && input._compactionRequest)
+          ? resolveBiggerContextMultipartParts(input, turnCapabilities)
+          : undefined;
       return {
         ...baseCompileOptions,
         ...(experimentalMultipartParts !== undefined
@@ -1137,7 +1141,16 @@ export function createChatGptWebAdapter(
                       manualRequest ? environment : undefined,
                       `${handoffTraceId}_fallback`,
                       turnCapabilities,
-                      { onCompactionProgress: armHandoffDeadline },
+                      {
+                        onCompactionProgress: armHandoffDeadline,
+                        // A fresh compaction fallback has no retained ChatGPT conversation to
+                        // summarize in place. Do not restage the entire oversized Codex history
+                        // through Bigger Context: that recreates the very capacity failure the
+                        // compaction is supposed to relieve. Force the normal bounded compaction
+                        // envelope so prompt compilation trims oldest history while preserving the
+                        // latest user instruction and produces a checkpoint that can actually fit.
+                        boundedCompactionFallback: true,
+                      },
                     );
                     retainOwnershipUntil(fallbackRuntime.physicalSettlement);
                     try {
