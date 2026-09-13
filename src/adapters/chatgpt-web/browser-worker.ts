@@ -1096,6 +1096,22 @@ export function remainingStageBudgetMs(
 export const CHATGPT_BROWSER_OBSERVATION_PROBE_TIMEOUT_MS = 5_000;
 export const MAX_CHATGPT_BROWSER_PAGE_REBINDS = 2;
 
+export function chatGptBrowserRebindCanRetryAfterViewportFailure(
+  error: unknown,
+  attempt: number,
+  progress: ChatGptExternalTurnProgressSnapshot | undefined,
+  now = Date.now(),
+): boolean {
+  if (!(error instanceof Error)
+    || !error.message.startsWith("ChatGPT browser surface did not expose an operational viewport:")) {
+    return false;
+  }
+  if (!Number.isSafeInteger(attempt) || attempt <= 0 || attempt >= MAX_CHATGPT_BROWSER_PAGE_REBINDS) {
+    return false;
+  }
+  return chatGptExternalProgressIsLive(progress, now, CHATGPT_RESPONSE_DOM_GRACE_MS);
+}
+
 export class ChatGptBrowserObservationTimeoutError extends Error {
   constructor(timeoutMs: number) {
     super(`ChatGPT browser DOM observation did not respond within ${timeoutMs}ms`);
@@ -4546,57 +4562,77 @@ export class ChatGptBrowserWorker {
         callerSignal?: AbortSignal,
       ): Promise<void> => {
         if (!launcherSurfaceId || !this.config.browserHostDescriptorPath) throw cause;
-        console.warn(
-          `[chatgpt-web] browser turn ${turn.traceId} is rebinding its existing launcher page after a stalled DOM probe:`
-          + ` ${redactChatGptUiDiagnostic(cause.message)}`,
-        );
-        const previousConnection = turnConnection;
-        // The observation timeout races the Playwright operation but cannot cancel the underlying
-        // page.evaluate by itself. A failed disconnect is terminal: opening a replacement while
-        // the stale probe still owns its transport would recreate the contention this rebind is
-        // meant to remove.
-        const connection = await connectAfterClosingBrowserConnection(
-          previousConnection,
-          () => {
-            turnConnection = undefined;
-            return this.runStage(
-              turn.traceId,
-              `response_page_rebind_${attempt}`,
-              browserStageTimeouts.browserPage,
-              async (stageSignal) => {
-                const signal = callerSignal
-                  ? AbortSignal.any([stageSignal, callerSignal])
-                  : turn.abortSignal
-                    ? AbortSignal.any([stageSignal, turn.abortSignal])
-                    : stageSignal;
-                await notifyLauncherTurn(this.config.browserHostDescriptorPath!, {
-                  phase: "heartbeat",
-                  traceId: turn.traceId,
-                  helperPid: process.pid,
-                  refreshViewport: true,
-                });
-                const rebound = await connectLauncherBrowserHost(
-                  this.config.browserHostDescriptorPath!,
+        let rebindAttempt = attempt;
+        let rebindCause = cause;
+        for (;;) {
+          console.warn(
+            `[chatgpt-web] browser turn ${turn.traceId} is rebinding its existing launcher page after a stalled DOM probe:`
+            + ` ${redactChatGptUiDiagnostic(rebindCause.message)}`,
+          );
+          const previousConnection = turnConnection;
+          try {
+            // The observation timeout races the Playwright operation but cannot cancel the underlying
+            // page.evaluate by itself. A failed disconnect is terminal: opening a replacement while
+            // the stale probe still owns its transport would recreate the contention this rebind is
+            // meant to remove.
+            const connection = await connectAfterClosingBrowserConnection(
+              previousConnection,
+              () => {
+                turnConnection = undefined;
+                return this.runStage(
+                  turn.traceId,
+                  `response_page_rebind_${rebindAttempt}`,
                   browserStageTimeouts.browserPage,
-                  launcherSurfaceId,
-                  signal,
+                  async (stageSignal) => {
+                    const signal = callerSignal
+                      ? AbortSignal.any([stageSignal, callerSignal])
+                      : turn.abortSignal
+                        ? AbortSignal.any([stageSignal, turn.abortSignal])
+                        : stageSignal;
+                    await notifyLauncherTurn(this.config.browserHostDescriptorPath!, {
+                      phase: "heartbeat",
+                      traceId: turn.traceId,
+                      helperPid: process.pid,
+                      refreshViewport: true,
+                    });
+                    const rebound = await connectLauncherBrowserHost(
+                      this.config.browserHostDescriptorPath!,
+                      browserStageTimeouts.browserPage,
+                      launcherSurfaceId,
+                      signal,
+                    );
+                    // Own the connection before validating its page: viewport failure still needs
+                    // the outer diagnostic capture and finally block to release this exact transport.
+                    turnConnection = rebound.browser;
+                    diagnosticPage = rebound.page;
+                    await waitForOperationalChatGptViewport(rebound.page, signal);
+                    return rebound;
+                  },
                 );
-                // Own the connection before validating its page: viewport failure still needs
-                // the outer diagnostic capture and finally block to release this exact transport.
-                turnConnection = rebound.browser;
-                diagnosticPage = rebound.page;
-                await waitForOperationalChatGptViewport(rebound.page, signal);
-                return rebound;
               },
             );
-          },
-        );
-        turnConnection = connection.browser;
-        page = connection.page;
-        diagnosticPage = page;
-        console.warn(
-          `[chatgpt-web] browser turn ${turn.traceId} rebound its existing launcher page after a stalled DOM probe`,
-        );
+            turnConnection = connection.browser;
+            page = connection.page;
+            diagnosticPage = page;
+            console.warn(
+              `[chatgpt-web] browser turn ${turn.traceId} rebound its existing launcher page after a stalled DOM probe`,
+            );
+            return;
+          } catch (error) {
+            if (!chatGptBrowserRebindCanRetryAfterViewportFailure(
+              error,
+              rebindAttempt,
+              turn.externalProgress?.snapshot(),
+            )) {
+              throw error;
+            }
+            rebindAttempt += 1;
+            rebindCause = error instanceof Error ? error : new Error(String(error));
+            console.warn(
+              `[chatgpt-web] browser turn ${turn.traceId} kept making native progress while its rebound page remained unobservable; retrying the same owned page (${rebindAttempt}/${MAX_CHATGPT_BROWSER_PAGE_REBINDS})`,
+            );
+          }
+        }
       };
       const recoverPageObservation = async (
         attempt: number,

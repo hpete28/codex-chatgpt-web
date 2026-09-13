@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { createContext, runInContext } from "node:vm";
 import type { Page } from "playwright-core";
 import { CHATGPT_BROWSER_OBSERVATION_PROBE_TIMEOUT_MS, CHATGPT_COMPLETION_SETTLE_MS, CHATGPT_EXTERNAL_PROGRESS_CLOCK_SKEW_MS, CHATGPT_EXTERNAL_PROGRESS_STALL_CEILING_MS, ChatGptCompletionTracker, chatGptExternalProgressSuppressesDomHealth, CHATGPT_RESPONSE_DOM_GRACE_MS, MAX_CHATGPT_INTERNAL_OBSERVATION_FAULTS, CHATGPT_COMPOSER_DOCUMENT_END_KEY, CHATGPT_COMPOSER_SELECT_ALL_KEY, ChatGptBrowserObservationTimeoutError, ChatGptBrowserWorker, ChatGptPromptAttachmentIntegrityError, ChatGptRunningResponseStallTracker, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_PAGE_REBINDS, MAX_CHATGPT_BROWSER_TABS, MAX_CHATGPT_CONNECTOR_TRIGGER_ATTEMPTS, assertChatGptWebInputWithinLimits, assertChatGptWebMultipartInputWithinLimits, browserDiagnosticCheckpoint, chatGptConnectorAttachmentMode, chatGptNewTurnIdentity, chatGptReboundTurnIdentity, chatGptSubmissionEvidence, connectAfterClosingBrowserConnection, dismissChatGptTemporaryChatOnboarding, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, resolveChatGptWebMultipartStagingMode, sanitizeChatGptBrowserDiagnosticState, setChatGptThinkMode, stripChatGptTraceControlSuffix, throwIfChatGptRateLimitDialog, throwIfChatGptSessionFailureAlert, throwIfChatGptTerminalErrorAlert, withChatGptBrowserObservationTimeout, CHATGPT_MULTIPART_RESPONSE_DOM_GRACE_MS, browserStageTimeouts, ChatGptSuspensionClock, remainingStageBudgetMs } from "../src/adapters/chatgpt-web/browser-worker";
-import { ensureChatGptPersonalizedConnectorAccess, waitForOperationalChatGptViewport } from "../src/adapters/chatgpt-web/browser-worker";
+import { chatGptBrowserRebindCanRetryAfterViewportFailure, ensureChatGptPersonalizedConnectorAccess, waitForOperationalChatGptViewport } from "../src/adapters/chatgpt-web/browser-worker";
 import { chatGptStoppedThinkingError } from "../src/adapters/chatgpt-web/adapter-error";
 import { CHATGPT_WEB_MODEL_ID } from "../src/adapters/chatgpt-web/model";
 import { CHATGPT_CONNECTOR_NAME, DEV_CHATGPT_CONNECTOR_NAME, defaultChromeExecutable, legacyChatGptConnectorMigrationMessage } from "../src/config";
@@ -448,6 +448,50 @@ test("operational viewport still fails when the fallback probe cannot prove the 
   await expect(waitForOperationalChatGptViewport(page)).rejects.toThrow(
     "ChatGPT browser surface did not expose an operational viewport",
   );
+});
+
+test("failed viewport rebind gets one bounded retry only while current-turn native progress is live", () => {
+  const viewportFailure = new Error(
+    "ChatGPT browser surface did not expose an operational viewport: page.waitForFunction: Timeout 10000ms exceeded.",
+  );
+  const liveProgress = {
+    revision: 1,
+    lastToolBatchRevision: 1,
+    activeToolCalls: 1,
+    lastProgressAt: 10_000,
+  };
+
+  expect(chatGptBrowserRebindCanRetryAfterViewportFailure(
+    viewportFailure,
+    1,
+    liveProgress,
+    10_500,
+  )).toBeTrue();
+  expect(chatGptBrowserRebindCanRetryAfterViewportFailure(
+    viewportFailure,
+    MAX_CHATGPT_BROWSER_PAGE_REBINDS,
+    liveProgress,
+    10_500,
+  )).toBeFalse();
+  expect(chatGptBrowserRebindCanRetryAfterViewportFailure(
+    new Error("stale CDP transport did not close"),
+    1,
+    liveProgress,
+    10_500,
+  )).toBeFalse();
+  expect(chatGptBrowserRebindCanRetryAfterViewportFailure(
+    viewportFailure,
+    1,
+    { ...liveProgress, activeToolCalls: 0, lastProgressAt: 0 },
+    CHATGPT_RESPONSE_DOM_GRACE_MS + 1,
+  )).toBeFalse();
+
+  const workerSource = readFileSync(new URL("../src/adapters/chatgpt-web/browser-worker.ts", import.meta.url), "utf8");
+  const rebindSource = workerSource.slice(
+    workerSource.indexOf("      const rebindLauncherPage = async ("),
+    workerSource.indexOf("      const recoverPageObservation = async ("),
+  );
+  expect(rebindSource).toContain("chatGptBrowserRebindCanRetryAfterViewportFailure");
 });
 
 test("Luna turns without a retained conversation never send connector identity alone", () => {
