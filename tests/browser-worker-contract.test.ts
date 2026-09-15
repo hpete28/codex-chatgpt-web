@@ -513,6 +513,25 @@ test("a stalled DOM observation fails within its probe budget", async () => {
 
 });
 
+test("Full-mode response observation is bounded before a native tool boundary can deadlock", () => {
+  const workerSource = readFileSync("src/adapters/chatgpt-web/browser-worker.ts", "utf8");
+  const loopStart = workerSource.indexOf("      let lastHeartbeat = 0;");
+  const acknowledgement = workerSource.indexOf(
+    "await turn.externalProgress.acknowledgeToolBatch",
+    loopStart,
+  );
+  expect(loopStart).toBeGreaterThan(-1);
+  expect(acknowledgement).toBeGreaterThan(loopStart);
+
+  const preAcknowledgementLoop = workerSource.slice(loopStart, acknowledgement);
+  expect(preAcknowledgementLoop).toMatch(
+    /snapshot = await withChatGptBrowserObservationTimeout\(\s*this\.responseDomSnapshot\(responseTurn\.locator, responseDomCache\),\s*\)/,
+  );
+  expect((preAcknowledgementLoop.match(
+    /withChatGptBrowserObservationTimeout\(\s*this\.responseDomSnapshot\(responseTurn\.locator, responseDomCache\),\s*\)/g,
+  ) ?? []).length).toBeGreaterThanOrEqual(2);
+});
+
 test("Bigger Context keeps an accepted stage and rebinds its acknowledgement after a stalled DOM probe", async () => {
   const provider: CodexProviderConfig = {
     adapter: "chatgpt-web",

@@ -5004,9 +5004,12 @@ export class ChatGptBrowserWorker {
           continue;
         }
 
-        let snapshot = await this.responseDomSnapshot(responseTurn.locator, responseDomCache);
-        if (!snapshot.responsePresent) {
-          try {
+        let snapshot: ChatGptResponseDomSnapshot;
+        try {
+          snapshot = await withChatGptBrowserObservationTimeout(
+            this.responseDomSnapshot(responseTurn.locator, responseDomCache),
+          );
+          if (!snapshot.responsePresent) {
             const rebound = await withChatGptBrowserObservationTimeout(
               this.reconcileAssistantTurnBinding(
                 page,
@@ -5019,33 +5022,35 @@ export class ChatGptBrowserWorker {
               responseTurn = rebound;
               responseDomCache.key = undefined;
               responseDomCache.snapshot = undefined;
-              snapshot = await this.responseDomSnapshot(responseTurn.locator, responseDomCache);
-            }
-          } catch (error) {
-            if (!(error instanceof ChatGptBrowserObservationTimeoutError) || !launcherSurfaceId) throw error;
-            consecutiveObservationRebinds += 1;
-            if (consecutiveObservationRebinds > MAX_CHATGPT_BROWSER_PAGE_REBINDS) {
-              throw new Error(
-                `ChatGPT browser DOM remained unresponsive after ${MAX_CHATGPT_BROWSER_PAGE_REBINDS} same-page rebinds`,
-                { cause: error },
+              snapshot = await withChatGptBrowserObservationTimeout(
+                this.responseDomSnapshot(responseTurn.locator, responseDomCache),
               );
             }
-            await rebindLauncherPage(consecutiveObservationRebinds, error, turn.abortSignal);
-            submissionBaseline = {
-              ...submissionBaseline,
-              userTurns: page.locator(CHATGPT_USER_TURN_SELECTOR),
-              responseTurns: page.locator(CHATGPT_ASSISTANT_TURN_SELECTOR),
-              domCache: {},
-            };
-            responseTurn = {
-              ...responseTurn,
-              locator: page.locator(`[data-turn-id=${JSON.stringify(responseTurn.identity)}]`),
-            };
-            responseDomCache.key = undefined;
-            responseDomCache.snapshot = undefined;
-            await diagnostics.capture(page, "response-page-rebound");
-            continue;
           }
+        } catch (error) {
+          if (!(error instanceof ChatGptBrowserObservationTimeoutError) || !launcherSurfaceId) throw error;
+          consecutiveObservationRebinds += 1;
+          if (consecutiveObservationRebinds > MAX_CHATGPT_BROWSER_PAGE_REBINDS) {
+            throw new Error(
+              `ChatGPT browser DOM remained unresponsive after ${MAX_CHATGPT_BROWSER_PAGE_REBINDS} same-page rebinds`,
+              { cause: error },
+            );
+          }
+          await rebindLauncherPage(consecutiveObservationRebinds, error, turn.abortSignal);
+          submissionBaseline = {
+            ...submissionBaseline,
+            userTurns: page.locator(CHATGPT_USER_TURN_SELECTOR),
+            responseTurns: page.locator(CHATGPT_ASSISTANT_TURN_SELECTOR),
+            domCache: {},
+          };
+          responseTurn = {
+            ...responseTurn,
+            locator: page.locator(`[data-turn-id=${JSON.stringify(responseTurn.identity)}]`),
+          };
+          responseDomCache.key = undefined;
+          responseDomCache.snapshot = undefined;
+          await diagnostics.capture(page, "response-page-rebound");
+          continue;
         }
         if (snapshot.stoppedThinkingVisible && !stalledResponseRecovery) throw chatGptStoppedThinkingError();
         if (snapshot.responsePresent) consecutiveObservationRebinds = 0;
