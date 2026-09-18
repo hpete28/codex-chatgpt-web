@@ -2,6 +2,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const { createHash } = require("node:crypto");
 const { EventEmitter } = require("node:events");
+const { createTurnObservationStore } = require("../electron/turn-observations.cjs");
 const fs = require("node:fs");
 const { resolve } = require("node:path");
 const {
@@ -25,6 +26,34 @@ const {
   navigationErrorForLog,
   navigationOriginForLog,
 } = require("../electron/browser-host.cjs");
+
+test("released automatic turns accept only their owner's late terminal observation", async () => {
+  const fixture = Object.assign(Object.create(BrowserHost.prototype), {
+    turnTabs: new Map(), turnObservationStore: createTurnObservationStore(),
+    releasedObservationOwners: new Map(), closedTurnOwners: new Map(),
+    userCancelledTurnOwners: new Map(), logger: { info() {} },
+    syncPowerSaveBlocker() {}, snapshot() { return {}; }, publishState() {},
+    removeTurnTab(tab) { this.turnTabs.delete(tab.id); },
+  });
+  const at = "2026-09-18T22:00:00.000Z";
+  for (let i = 0; i < 22; i++) {
+    const traceId = `released-${i}`;
+    fixture.turnTabs.set(traceId, { id: traceId, traceId, helperPid: 123,
+      view: { webContents: { isDestroyed: () => true } } });
+    assert.equal(fixture.observeTurn(traceId, 123, { traceId, sequence: 1, at, phase: "preparing" }), true);
+    await fixture.endTurn(traceId, 123, "failed", false);
+  }
+  assert.equal(fixture.closedTurnOwners.size, 0);
+  assert.equal(fixture.releasedObservationOwners.size, 20);
+  const terminal = { traceId: "released-21", sequence: 2, at, phase: "failed" };
+  assert.equal(fixture.observeTurn(terminal.traceId, 456, terminal), false);
+  assert.equal(fixture.observeTurn(terminal.traceId, 123, { ...terminal, phase: "responding" }), false);
+  assert.equal(fixture.observeTurn("unknown", 123, { ...terminal, traceId: "unknown" }), false);
+  assert.equal(fixture.observeTurn("released-0", 123, { ...terminal, traceId: "released-0" }), false);
+  assert.equal(fixture.observeTurn(terminal.traceId, 123, terminal), true);
+  assert.equal(fixture.turnObservationStore.get(terminal.traceId).phase, "failed");
+  assert.equal(fixture.observeTurn(terminal.traceId, 123, { ...terminal, sequence: 3 }), false);
+});
 
 test("manual prompt handoff keeps ordinary turns at thirty seconds and compaction at two minutes", () => {
   assert.equal(MANUAL_SUBMIT_TIMEOUT_MS, 30_000);
