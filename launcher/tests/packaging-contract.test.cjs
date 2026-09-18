@@ -122,6 +122,9 @@ test("release installers resolve checksummed native launcher assets", () => {
   const packageSmoke = fs.readFileSync(path.join(launcherRoot, "scripts", "smoke-package.cjs"), "utf8");
   assert.match(packageSmoke, /run\(installer, \["\/S", "\/currentuser"\]/);
   assert.match(packageSmoke, /reg\.exe[\s\S]*InstallLocation/);
+  assert.match(packageSmoke, /CODEX_WEB_GPT_SMOKE_ISOLATED/);
+  assert.match(packageSmoke, /"--dir"/);
+  assert.match(packageSmoke, /win-unpacked/);
 });
 
 test("packaged launcher owns a detached checksummed updater for every release platform", () => {

@@ -14,6 +14,8 @@ const launcherManifest = JSON.parse(
   fs.readFileSync(path.join(launcherRoot, "package.json"), "utf8"),
 );
 const expectedVersion = launcherManifest.version;
+const electronBuilderCli = require.resolve("electron-builder/out/cli/cli.js", { paths: [launcherRoot] });
+const isolatedWindowsSmoke = process.env.CODEX_WEB_GPT_SMOKE_ISOLATED === "1";
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-package-smoke-"));
 const markerPath = path.join(scratch, "ready.json");
 const coreHome = path.join(scratch, "core-home");
@@ -75,6 +77,27 @@ function smokeEnvironment() {
   };
 }
 
+function stageIsolatedWindowsPackage(env) {
+  const output = path.join(scratch, "windows-package");
+  const builderEnv = { ...env };
+  if (!builderEnv.CSC_LINK && !builderEnv.CSC_NAME) {
+    builderEnv.CSC_IDENTITY_AUTO_DISCOVERY = "false";
+  }
+  run("node", [
+    electronBuilderCli,
+    "--win",
+    "--dir",
+    "--publish",
+    "never",
+    `--config.directories.output=${output}`,
+  ], {
+    cwd: launcherRoot,
+    env: builderEnv,
+    timeout: 120_000,
+  });
+  return path.join(output, "win-unpacked", `${launcherManifest.build.productName}.exe`);
+}
+
 try {
   let executable;
   let command;
@@ -100,9 +123,13 @@ try {
     args = ["-a", executable, "--launcher-smoke-test"];
     env.APPIMAGE_EXTRACT_AND_RUN = "1";
   } else if (process.platform === "win32") {
-    const installer = artifact(/-win-x64\.exe$/, "Windows installer");
-    run(installer, ["/S", "/currentuser"], { timeout: 120_000 });
-    executable = path.join(windowsInstallLocation(), `${launcherManifest.build.productName}.exe`);
+    if (isolatedWindowsSmoke) {
+      executable = stageIsolatedWindowsPackage(env);
+    } else {
+      const installer = artifact(/-win-x64\.exe$/, "Windows installer");
+      run(installer, ["/S", "/currentuser"], { timeout: 120_000 });
+      executable = path.join(windowsInstallLocation(), `${launcherManifest.build.productName}.exe`);
+    }
     command = executable;
     args = ["--launcher-smoke-test"];
   } else {
