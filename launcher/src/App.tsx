@@ -1634,12 +1634,21 @@ function ActivitySurface({
       </div>
       <div className="section-heading activity-heading">
         <span>{copy.recentActivity}</span>
+        <div className="activity-actions">
+          <SecondaryButton
+            icon="external"
+            onClick={() => void api?.exportDiagnosticReport(selectedObservation?.traceId ?? null)
+              .catch((cause) => setError(messageOf(cause)))}
+          >
+            {copy.exportDiagnosticReport}
+          </SecondaryButton>
         <SecondaryButton
           icon="external"
           onClick={() => void api!.exportLogs().catch((cause) => setError(messageOf(cause)))}
         >
           {copy.exportSafeLog}
         </SecondaryButton>
+        </div>
       </div>
       <div className="activity-table">
         {logs.length === 0 ? (

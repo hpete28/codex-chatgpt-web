@@ -101,6 +101,40 @@ export interface TurnObservation {
   workState?: "continue" | "complete" | "blocked";
 }
 
+export interface DiagnosticReport {
+  schemaVersion: 1;
+  generatedAt: string;
+  appVersion: string;
+  profile: LauncherProfile;
+  mode: "full" | "browser-only" | null;
+  interactionMode: BrowserInteractionMode | null;
+  launcherBuild: BuildInfo | null;
+  runtimeBuild: BuildInfo | null;
+  runtimeBundleId: string | null;
+  doctor: {
+    observedAt: string | null;
+    checks: Array<{ id: string; status: "ok" | "warning" | "error" }>;
+  };
+  turn: {
+    traceId: string;
+    phase: TurnObservation["phase"];
+    observedAt: string;
+    acknowledgedParts?: number;
+    totalParts?: number;
+    continuationCount?: number;
+    workState?: "continue" | "complete" | "blocked";
+  } | null;
+  unavailable: Array<
+    | "launcher-build"
+    | "runtime-build"
+    | "runtime-bundle"
+    | "doctor"
+    | "turn"
+    | "mode"
+    | "interaction-mode"
+  >;
+}
+
 export interface OperationState {
   name: string;
   status: "running" | "completed" | "failed";
@@ -194,6 +228,7 @@ export interface LauncherApi {
   setSidebarState(state: { open: boolean; width: number }): Promise<LauncherState>;
   logs(limit?: number): Promise<LogRecord[]>;
   exportLogs(): Promise<string | null>;
+  exportDiagnosticReport(traceId?: string | null): Promise<string | null>;
   installUpdate(): Promise<boolean>;
   windowState(): Promise<{ fullScreen: boolean; maximized: boolean }>;
   windowControl(action: "close" | "minimize" | "zoom"): void;

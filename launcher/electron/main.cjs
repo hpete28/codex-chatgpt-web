@@ -20,6 +20,7 @@ const { BrowserHost, navigationErrorForLog } = require("./browser-host.cjs");
 const { BrowserControlServer } = require("./control-server.cjs");
 const { getAutostart, setAutostart } = require("./autostart.cjs");
 const { readBuildInfoFile, sameBuildInfo } = require("./build-info.cjs");
+const { buildDiagnosticReport, saveDiagnosticReport } = require("./diagnostic-report.cjs");
 const {
   createLogger,
   exportSanitizedLogs,
@@ -101,6 +102,7 @@ let updateController = null;
 let launcherBuildInfo = null;
 let runtimeBuildInfo = null;
 let runtimeBundleId = null;
+let lastCompletedDoctor = null;
 
 function readRuntimeBuildMetadata(runtimeRoot) {
   if (!runtimeRoot) return { buildInfo: null, bundleId: null };
@@ -534,7 +536,7 @@ function smokePassedForCurrentVersion(state) {
   return state.browserSmokePassed === true && state.browserSmokeVersion === app.getVersion();
 }
 
-function registerIpc({ logger, stateStore }) {
+function registerIpc({ logger, stateStore, diagnosticSourcePaths = [] }) {
   const handle = (channel, handler) => registerLoggedIpc(ipcMain, logger, channel, handler);
   handle("launcher:snapshot", async () => ({
     profile: LAUNCHER_PROFILE.kind,
@@ -742,9 +744,16 @@ function registerIpc({ logger, stateStore }) {
     }
   });
 
-  handle("launcher:doctor", async () => withBuildDoctorChecks(
-    IS_DEV_PROFILE ? await runtimeHost.devDoctor() : await runtimeHost.doctor(),
-  ));
+  handle("launcher:doctor", async () => {
+    const report = withBuildDoctorChecks(
+      IS_DEV_PROFILE ? await runtimeHost.devDoctor() : await runtimeHost.doctor(),
+    );
+    lastCompletedDoctor = {
+      observedAt: new Date().toISOString(),
+      report,
+    };
+    return report;
+  });
   handle("launcher:cancel-turns", () => {
     if (IS_DEV_PROFILE) throw new Error("DEV chat turns are owned by the repository CLI process");
     return runtimeHost.cancelActiveTurns();
@@ -965,6 +974,47 @@ function registerIpc({ logger, stateStore }) {
     logger.info("launcher.logs_exported", { recordCount });
     return result.filePath;
   });
+  handle("launcher:export-diagnostic-report", async (_event, input) => {
+    const state = stateStore.read();
+    let mode = null;
+    try {
+      const runtimeSnapshot = runtimeHost?.runtimeConfigSnapshot();
+      mode = runtimeSnapshot?.mode === "full" || runtimeSnapshot?.mode === "browser-only"
+        ? runtimeSnapshot.mode
+        : null;
+    } catch {}
+    const observations = browserHost?.turnObservations() ?? [];
+    const selectedTraceId = typeof input?.traceId === "string" ? input.traceId : null;
+    const selectedObservation = selectedTraceId
+      ? observations.find((observation) => observation.traceId === selectedTraceId) ?? null
+      : observations.at(-1) ?? null;
+    const report = buildDiagnosticReport({
+      appVersion: app.getVersion(),
+      profile: LAUNCHER_PROFILE.kind,
+      mode,
+      interactionMode: state.browserInteractionMode,
+      launcherBuild: launcherBuildInfo,
+      runtimeBuild: runtimeBuildInfo,
+      runtimeBundleId,
+      doctorCache: lastCompletedDoctor,
+      turnObservation: selectedObservation,
+    });
+    const date = report.generatedAt.slice(0, 10);
+    const copy = nativeCopyFor(state.language);
+    const result = await dialog.showSaveDialog(mainWindow, {
+      title: copy.exportDiagnostics,
+      defaultPath: path.join(app.getPath("documents"), `codex-web-gpt-report-${date}.json`),
+      filters: [{ name: "JSON", extensions: ["json"] }],
+    });
+    if (result.canceled || !result.filePath) return null;
+    saveDiagnosticReport({
+      destinationPath: result.filePath,
+      report,
+      protectedPaths: diagnosticSourcePaths,
+    });
+    logger.info("launcher.diagnostic_report_exported", { unavailable: report.unavailable });
+    return result.filePath;
+  });
   handle("launcher:update-install", async () => {
     if (!updateController) throw new Error("Launcher updates are unavailable");
     const launch = await updateController.beginInstall();
@@ -1061,7 +1111,8 @@ async function start() {
 
   await app.whenReady();
 
-  const stateStore = createStateStore(path.join(app.getPath("userData"), "launcher-state.json"));
+  const launcherStatePath = path.join(app.getPath("userData"), "launcher-state.json");
+  const stateStore = createStateStore(launcherStatePath);
   if (IS_DEV_PROFILE && !stateStore.read().onboardingComplete) {
     stateStore.update({
       language: stateStore.read().language || "en",
@@ -1169,7 +1220,18 @@ async function start() {
     publish: (state) => send("launcher:update-state", state),
     logger,
   });
-  registerIpc({ logger, stateStore });
+  registerIpc({
+    logger,
+    stateStore,
+    diagnosticSourcePaths: [
+      logger.filePath,
+      path.join(app.getPath("logs"), "process-stream-errors.log"),
+      launcherStatePath,
+      launcherBuildPath,
+      installedRuntimeRoot ? path.join(installedRuntimeRoot, "app", "build-info.json") : null,
+      installedRuntimeRoot ? path.join(installedRuntimeRoot, "manifest.json") : null,
+    ],
+  });
   const trayAvailable = createTray(logger, stateStore.read().language);
   if (startHidden && !trayAvailable) mainWindow.once("ready-to-show", () => showMainWindow());
   const launcherSmokeTest = process.argv.includes("--launcher-smoke-test");

@@ -345,6 +345,20 @@ test("launcher shares only privacy-safe exported diagnostics", () => {
   assert.doesNotMatch(electronMain, /launcher:open-logs/);
 });
 
+test("launcher exports an allowlisted diagnostic report without implicit probes", () => {
+  assert.match(appSource, /exportDiagnosticReport\(selectedObservation\?\.traceId \?\? null\)/);
+  assert.match(preloadSource, /exportDiagnosticReport:[\s\S]*?launcher:export-diagnostic-report/);
+  const start = electronMain.indexOf('handle("launcher:export-diagnostic-report"');
+  const end = electronMain.indexOf('handle("launcher:update-install"', start);
+  const handler = electronMain.slice(start, end);
+
+  assert.ok(start >= 0 && end > start, "diagnostic report export handler must remain registered");
+  assert.match(handler, /buildDiagnosticReport\([\s\S]*?showSaveDialog[\s\S]*?saveDiagnosticReport/);
+  assert.match(handler, /if \(result\.canceled \|\| !result\.filePath\) return null;/);
+  assert.doesNotMatch(handler, /runtimeHost\.(?:doctor|devDoctor|setup|repair|cancel)/);
+  assert.doesNotMatch(handler, /browserHost\.(?:probeAuthentication|verifyConnector|reveal)/);
+});
+
 test("MCP verification failures stay inside the structured setup report", () => {
   assert.match(appSource, /next\.operation\.name !== "mcp-verification"/);
   assert.match(appSource, /next\.name !== "mcp-verification"/);

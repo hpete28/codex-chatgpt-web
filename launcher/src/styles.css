@@ -1823,6 +1823,13 @@ code {
   margin-bottom: 2px;
 }
 
+.activity-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
 .activity-heading .button-secondary {
   min-height: 26px;
 }
