@@ -82,6 +82,14 @@ export interface DoctorReport {
   checks: DoctorCheck[];
 }
 
+export interface BuildInfo {
+  schemaVersion: 1;
+  distribution: "custom";
+  repository: "hpete28/codex-chatgpt-web";
+  sourceRevision: string | null;
+  dirty: boolean | null;
+}
+
 export interface OperationState {
   name: string;
   status: "running" | "completed" | "failed";
@@ -89,7 +97,8 @@ export interface OperationState {
 }
 
 export type UpdateState =
-  | { status: "disabled" | "idle" | "checking" | "up-to-date" }
+  | { status: "disabled"; reason?: "custom-build" | "unknown-build" }
+  | { status: "idle" | "checking" | "up-to-date" }
   | { status: "available" | "downloading" | "installing"; version: string }
   | { status: "error"; message: string };
 
@@ -116,6 +125,9 @@ export interface LauncherSnapshot {
   platform: string;
   packaged: boolean;
   version: string;
+  launcherBuild: BuildInfo | null;
+  runtimeBuild: BuildInfo | null;
+  runtimeBundleId: string | null;
   smokePassed: boolean;
   operation: OperationState | null;
   update: UpdateState;

@@ -133,11 +133,13 @@ Top-level `model_context_window` raises only the proxied native rows' advertised
 Codex to apply its own configured context override without clamping. Routed ChatGPT Web models
 retain their measured adapter-owned limits.
 
-Bigger Context partitions complete ordered records against each message's available token and
-composer budgets. Inert stages carry text; the final message also carries all retained attachments,
-the execution contract and any output schema. Their reserves are deducted before partitioning,
-then preflight checks the actual compiled messages and total transaction. The selected execution
-effort, attachment references and three-part maximum remain unchanged.
+Bigger Context keeps a three-times semantic context ceiling while using an adaptive physical
+transport. Complete ordered records are partitioned against each message's available token and
+composer budgets into two through eight browser messages as needed; extra transport parts improve
+delivery headroom but do not expand the three-times semantic ceiling. Inert stages carry text; the
+final message also carries all retained attachments, the execution contract and any output schema.
+Their reserves are deducted before partitioning, then preflight checks the actual compiled messages
+and total transaction. The selected execution effort and attachment references remain unchanged.
 
 In Full mode, routed compaction v1/v2 uses the exact retained source agent and a one-shot MCP control
 capability that accepts only the bound checkpoint; it cannot claim or invoke the ordinary Codex tool

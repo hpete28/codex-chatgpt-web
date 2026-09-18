@@ -5,10 +5,33 @@ const path = require("node:path");
 
 const launcherRoot = path.resolve(__dirname, "..");
 const appSource = fs.readFileSync(path.join(launcherRoot, "src", "App.tsx"), "utf8");
+const i18nSource = fs.readFileSync(path.join(launcherRoot, "src", "i18n.ts"), "utf8");
 const stylesSource = fs.readFileSync(path.join(launcherRoot, "src", "styles.css"), "utf8");
 const electronMain = fs.readFileSync(path.join(launcherRoot, "electron", "main.cjs"), "utf8");
 const browserHostSource = fs.readFileSync(path.join(launcherRoot, "electron", "browser-host.cjs"), "utf8");
 const preloadSource = fs.readFileSync(path.join(launcherRoot, "electron", "preload.cjs"), "utf8");
+
+test("settings distinguish launcher and runtime build identities", () => {
+  assert.match(appSource, /<BuildIdentityCard build=\{snapshot\.launcherBuild\}[\s\S]*?title=\{copy\.launcherBuild\}/);
+  assert.match(appSource, /<BuildIdentityCard[\s\S]*?build=\{snapshot\.runtimeBuild\}[\s\S]*?bundleId=\{snapshot\.runtimeBundleId\}/);
+  assert.match(appSource, /build\.sourceRevision\.slice\(0, 12\)/);
+  assert.match(appSource, /bundleId\.slice\(0, 12\)/);
+  assert.match(appSource, /build\?\.dirty === false[\s\S]*?copy\.cleanBuild[\s\S]*?build\?\.dirty === true[\s\S]*?copy\.dirtyBuild[\s\S]*?copy\.unknownBuild/);
+  assert.match(appSource, /buildIdentitiesDiffer\(snapshot\.launcherBuild, snapshot\.runtimeBuild\)/);
+  assert.match(appSource, /launcher\.sourceRevision !== runtime\.sourceRevision/);
+  assert.match(appSource, /launcher\.dirty !== runtime\.dirty/);
+  assert.match(appSource, /buildMismatch[\s\S]*?copy\.buildMismatch/);
+  assert.match(stylesSource, /\.build-identity-grid\s*\{[^}]*grid-template-columns:\s*repeat\(2, minmax\(0, 1fr\)\);/s);
+});
+
+test("settings explain why the public updater is disabled for non-public builds", () => {
+  assert.match(appSource, /updaterDisabledReason === "custom-build"[\s\S]*?copy\.customUpdaterDisabled/);
+  assert.match(appSource, /updaterDisabledReason === "unknown-build"[\s\S]*?copy\.unknownUpdaterDisabled/);
+  assert.equal((i18nSource.match(/customUpdaterDisabled:/g) || []).length, 5);
+  assert.equal((i18nSource.match(/unknownUpdaterDisabled:/g) || []).length, 5);
+  assert.match(i18nSource, /customUpdaterDisabled: "Public updater is disabled for custom builds\. Updates use reviewed upstream integration and a separately authorized installation\."/);
+  assert.doesNotMatch(appSource, /hpete28\/codex-chatgpt-web\/releases/);
+});
 
 test("embedded ChatGPT is measured only after its animated surface mounts", () => {
   assert.match(appSource, /const \[browserSlot, setBrowserSlot\] = useState<HTMLDivElement \| null>\(null\)/);

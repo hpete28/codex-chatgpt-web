@@ -1915,6 +1915,60 @@ code {
   padding: 12px 0;
 }
 
+.build-identity-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.build-identity-card {
+  min-width: 0;
+  padding: 13px 14px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-background-control);
+}
+
+.build-identity-card h3 {
+  margin: 0 0 10px;
+  color: var(--color-text-primary);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.build-identity-card dl,
+.build-identity-card dd {
+  margin: 0;
+}
+
+.build-identity-card dl {
+  display: grid;
+  gap: 7px;
+}
+
+.build-identity-card dl > div {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  color: var(--color-text-tertiary);
+  font-size: var(--text-xs);
+}
+
+.build-identity-card dd {
+  max-width: 150px;
+  overflow: hidden;
+  color: var(--color-text-secondary);
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.build-identity-value {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
 .language-menu {
   position: relative;
   z-index: 1;

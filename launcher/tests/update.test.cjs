@@ -14,6 +14,14 @@ const {
   validateReleaseAssetUrl,
 } = require("../electron/update.cjs");
 
+const customBuildInfo = {
+  schemaVersion: 1,
+  distribution: "custom",
+  repository: "hpete28/codex-chatgpt-web",
+  sourceRevision: "a".repeat(40),
+  dirty: false,
+};
+
 test("Linux auto-update fails closed without the stable installer wrapper", () => {
   const previousAppImage = process.env.CODEX_WEB_GPT_APPIMAGE;
   const previousWrapper = process.env.CODEX_WEB_GPT_LAUNCHER_EXECUTABLE;
@@ -75,111 +83,50 @@ test("macOS bundle resolution never guesses outside Contents/MacOS", () => {
   assert.throws(() => macApplicationPath("/tmp/Codex Web GPT"), /Could not resolve/);
 });
 
-test("startup check runs once and exposes only a newer complete release", async () => {
+test("custom packaged builds disable public update checks before release access", async () => {
   let calls = 0;
-  const published = [];
   const controller = createUpdateController({
     currentVersion: "1.1.4",
     platform: "linux",
     arch: "x64",
     packaged: true,
+    buildInfo: customBuildInfo,
     executablePath: "/tmp/launcher",
     runtimeExecutable: "/tmp/bun",
     logsDirectory: "/tmp/logs",
-    publish: (state) => published.push(state),
     dependencies: {
       fetchRelease: async () => {
         calls += 1;
-        return {
-          tag_name: "v1.2.0",
-          assets: [
-            {
-              name: "codex-web-gpt-1.2.0-linux-x64.AppImage",
-              browser_download_url: "https://github.com/miuuyy/codex-chatgpt-web/releases/download/v1.2.0/codex-web-gpt-1.2.0-linux-x64.AppImage",
-            },
-            {
-              name: "checksums.txt",
-              browser_download_url: "https://github.com/miuuyy/codex-chatgpt-web/releases/download/v1.2.0/checksums.txt",
-            },
-          ],
-        };
+        return {};
       },
     },
   });
-  assert.deepEqual(await controller.checkOnce(), { status: "available", version: "1.2.0" });
-  assert.deepEqual(await controller.checkOnce(), { status: "available", version: "1.2.0" });
-  assert.equal(calls, 1);
-  assert.deepEqual(published.map((state) => state.status), ["checking", "available"]);
+  assert.deepEqual(controller.getState(), { status: "disabled", reason: "custom-build" });
+  assert.deepEqual(await controller.checkOnce(), { status: "disabled", reason: "custom-build" });
+  await assert.rejects(controller.beginInstall(), /disabled for this custom build/);
+  assert.equal(calls, 0);
 });
 
-test("verified update is handed to one detached worker", async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "launcher-update-test-"));
-  const oldAppImage = path.join(root, "versions", "1.1.4", "Codex Web GPT.AppImage");
-  const wrapper = path.join(root, "bin", "codex-web-gpt");
-  fs.mkdirSync(path.dirname(oldAppImage), { recursive: true });
-  fs.mkdirSync(path.dirname(wrapper), { recursive: true });
-  fs.writeFileSync(oldAppImage, "old");
-  fs.writeFileSync(wrapper, "old wrapper");
-  const assetBody = Buffer.from("new appimage");
-  const hash = require("node:crypto").createHash("sha256").update(assetBody).digest("hex");
-  let spawned = null;
-  const previousAppImage = process.env.CODEX_WEB_GPT_APPIMAGE;
-  const previousWrapper = process.env.CODEX_WEB_GPT_LAUNCHER_EXECUTABLE;
-  process.env.CODEX_WEB_GPT_APPIMAGE = oldAppImage;
-  process.env.CODEX_WEB_GPT_LAUNCHER_EXECUTABLE = wrapper;
-  try {
-    const controller = createUpdateController({
-      currentVersion: "1.1.4",
-      platform: "linux",
-      arch: "x64",
-      packaged: true,
-      executablePath: "/tmp/launcher",
-      runtimeExecutable: "/durable/bun",
-      logsDirectory: path.join(root, "logs"),
-      dependencies: {
-        fetchRelease: async () => ({
-          tag_name: "v1.2.0",
-          assets: [
-            {
-              name: "codex-web-gpt-1.2.0-linux-x64.AppImage",
-              browser_download_url: "https://github.com/miuuyy/codex-chatgpt-web/releases/download/v1.2.0/codex-web-gpt-1.2.0-linux-x64.AppImage",
-            },
-            {
-              name: "checksums.txt",
-              browser_download_url: "https://github.com/miuuyy/codex-chatgpt-web/releases/download/v1.2.0/checksums.txt",
-            },
-          ],
-        }),
-        downloadText: async () => `${hash}  codex-web-gpt-1.2.0-linux-x64.AppImage\n`,
-        downloadFile: async (_url, destination) => fs.writeFileSync(destination, assetBody),
-        sha256: (filePath) => require("node:crypto").createHash("sha256").update(fs.readFileSync(filePath)).digest("hex"),
-        spawnWorker: (runtime, worker, job) => {
-          spawned = { runtime, worker, job, data: JSON.parse(fs.readFileSync(job, "utf8")) };
-          return { pid: 123, unref() {}, kill() {} };
-        },
-      },
-    });
-    await controller.checkOnce();
-    const launch = await controller.beginInstall();
-    assert.equal(spawned.runtime, "/durable/bun");
-    assert.equal(spawned.data.version, "1.2.0");
-    assert.equal(spawned.data.target, oldAppImage);
-    assert.equal(spawned.data.wrapper, wrapper);
-    assert.equal(path.basename(spawned.data.runnerSource), "linux-appimage-runner.sh");
-    assert.equal(fs.existsSync(spawned.data.runnerSource), true);
-    assert.equal(controller.getState().status, "installing");
-    controller.cancelInstall(launch);
-    assert.equal(fs.existsSync(launch.tempRoot), false);
-    assert.deepEqual(controller.getState(), { status: "available", version: "1.2.0" });
-  } finally {
-    if (previousAppImage === undefined) delete process.env.CODEX_WEB_GPT_APPIMAGE;
-    else process.env.CODEX_WEB_GPT_APPIMAGE = previousAppImage;
-    if (previousWrapper === undefined) delete process.env.CODEX_WEB_GPT_LAUNCHER_EXECUTABLE;
-    else process.env.CODEX_WEB_GPT_LAUNCHER_EXECUTABLE = previousWrapper;
-    fs.rmSync(root, { recursive: true, force: true });
-  }
+test("unknown packaged build identity also disables public updates", async () => {
+  let calls = 0;
+  const controller = createUpdateController({
+    currentVersion: "1.1.4",
+    platform: "win32",
+    arch: "x64",
+    packaged: true,
+    buildInfo: null,
+    executablePath: "C:\\Codex Web GPT.exe",
+    runtimeExecutable: "C:\\runtime\\bun.exe",
+    logsDirectory: "C:\\logs",
+    dependencies: {
+      fetchRelease: async () => { calls += 1; return {}; },
+    },
+  });
+  assert.deepEqual(controller.getState(), { status: "disabled", reason: "unknown-build" });
+  assert.deepEqual(await controller.checkOnce(), { status: "disabled", reason: "unknown-build" });
+  await assert.rejects(controller.beginInstall(), /identity is unknown/);
+  assert.equal(calls, 0);
 });
-
 test("detached worker replaces an installed Linux AppImage and removes the old version", {
   skip: process.platform === "win32" ? "Linux AppImage execution is not meaningful on Windows" : false,
 }, () => {

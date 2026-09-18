@@ -32,6 +32,11 @@ Full harness mode connects ChatGPT to the current task’s files, terminal, tool
 
 ## Get started
 
+> **Custom fork builds:** the download buttons and terminal installers below are the public upstream
+> distribution. A reviewed `hpete28/codex-chatgpt-web` custom build records its source revision and
+> disables the public in-app updater; update that build only through a reviewed upstream integration
+> and a separately authorized installation.
+
 **Available models:** Free/Go → **Luna / Think**. Accounts with reasoning controls → **Instant–High**, plus **Extra High** and **Pro** when available. The launcher detects what your account can use.
 
 1. **Install the launcher** using the download for your system above.
@@ -44,7 +49,10 @@ The app includes its browser and runtime. No separate Chrome, Node, or Bun insta
 <details>
 <summary><strong>Terminal install, updates & repair</strong></summary>
 
-Quit the launcher before updating. These installers select the platform and architecture, verify the published checksums, and preserve your ChatGPT profile and launcher settings.
+Quit the launcher before updating. These are the **public upstream installers** for
+`miuuyy/codex-chatgpt-web`; they select the platform and architecture, verify the published
+checksums, and preserve your ChatGPT profile and launcher settings. They are not the default repair
+or update path for a reviewed custom-fork installation.
 
 **macOS / Linux**
 

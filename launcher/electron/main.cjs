@@ -19,6 +19,7 @@ const {
 const { BrowserHost, navigationErrorForLog } = require("./browser-host.cjs");
 const { BrowserControlServer } = require("./control-server.cjs");
 const { getAutostart, setAutostart } = require("./autostart.cjs");
+const { readBuildInfoFile, sameBuildInfo } = require("./build-info.cjs");
 const {
   createLogger,
   exportSanitizedLogs,
@@ -97,6 +98,73 @@ let lastOperation = null;
 let catalogVerificationTimer = null;
 let catalogVerificationInFlight = false;
 let updateController = null;
+let launcherBuildInfo = null;
+let runtimeBuildInfo = null;
+let runtimeBundleId = null;
+
+function readRuntimeBuildMetadata(runtimeRoot) {
+  if (!runtimeRoot) return { buildInfo: null, bundleId: null };
+  const buildInfo = readBuildInfoFile(path.join(runtimeRoot, "app", "build-info.json"));
+  let bundleId = null;
+  try {
+    const manifest = JSON.parse(fs.readFileSync(path.join(runtimeRoot, "manifest.json"), "utf8"));
+    if (typeof manifest?.bundleId === "string" && /^[a-f0-9]{64}$/.test(manifest.bundleId)) {
+      bundleId = manifest.bundleId;
+    }
+  } catch {}
+  return { buildInfo, bundleId };
+}
+
+function buildDoctorChecks() {
+  const checks = [];
+  if (!launcherBuildInfo) {
+    checks.push({
+      id: "launcher-build",
+      status: "warning",
+      message: "Launcher build provenance is unavailable",
+    });
+  } else {
+    checks.push({
+      id: "launcher-build",
+      status: launcherBuildInfo.dirty === false ? "ok" : "warning",
+      message: launcherBuildInfo.dirty === false
+        ? `Launcher custom build ${launcherBuildInfo.sourceRevision?.slice(0, 12) || "unknown"} is recorded as clean`
+        : `Launcher custom build ${launcherBuildInfo.sourceRevision?.slice(0, 12) || "unknown"} has unknown or dirty source state`,
+    });
+  }
+  if (!runtimeBuildInfo) {
+    checks.push({
+      id: "runtime-build",
+      status: "warning",
+      message: "Runtime build provenance is unavailable",
+    });
+  } else {
+    checks.push({
+      id: "runtime-build",
+      status: runtimeBuildInfo.dirty === false ? "ok" : "warning",
+      message: runtimeBuildInfo.dirty === false
+        ? `Runtime custom build ${runtimeBuildInfo.sourceRevision?.slice(0, 12) || "unknown"} is recorded as clean`
+        : `Runtime custom build ${runtimeBuildInfo.sourceRevision?.slice(0, 12) || "unknown"} has unknown or dirty source state`,
+    });
+  }
+  if (launcherBuildInfo && runtimeBuildInfo) {
+    checks.push({
+      id: "build-match",
+      status: sameBuildInfo(launcherBuildInfo, runtimeBuildInfo) ? "ok" : "warning",
+      message: sameBuildInfo(launcherBuildInfo, runtimeBuildInfo)
+        ? "Launcher and runtime build provenance match"
+        : "Launcher and runtime build provenance do not match",
+    });
+  }
+  return checks;
+}
+
+function withBuildDoctorChecks(report) {
+  return {
+    ...report,
+    checks: [...report.checks, ...buildDoctorChecks()],
+  };
+}
 
 function findFreePort() {
   return new Promise((resolve, reject) => {
@@ -488,6 +556,9 @@ function registerIpc({ logger, stateStore }) {
     platform: process.platform,
     packaged: app.isPackaged,
     version: app.getVersion(),
+    launcherBuild: launcherBuildInfo,
+    runtimeBuild: runtimeBuildInfo,
+    runtimeBundleId,
     smokePassed: smokePassedThisSession || smokePassedForCurrentVersion(stateStore.read()),
     operation: lastOperation,
     update: updateController?.getState() ?? { status: "disabled" },
@@ -604,7 +675,9 @@ function registerIpc({ logger, stateStore }) {
       return report;
     }
     publishOperation({ name: operationName, status: "running", message: "Checking local runtime" });
-    const report = IS_DEV_PROFILE ? await runtimeHost.devDoctor() : await runtimeHost.doctor();
+    const report = withBuildDoctorChecks(
+      IS_DEV_PROFILE ? await runtimeHost.devDoctor() : await runtimeHost.doctor(),
+    );
     if (!report.ok) {
       const message = report.checks
         .filter((check) => check.status === "error")
@@ -668,7 +741,9 @@ function registerIpc({ logger, stateStore }) {
     }
   });
 
-  handle("launcher:doctor", () => IS_DEV_PROFILE ? runtimeHost.devDoctor() : runtimeHost.doctor());
+  handle("launcher:doctor", async () => withBuildDoctorChecks(
+    IS_DEV_PROFILE ? await runtimeHost.devDoctor() : await runtimeHost.doctor(),
+  ));
   handle("launcher:cancel-turns", () => {
     if (IS_DEV_PROFILE) throw new Error("DEV chat turns are owned by the repository CLI process");
     return runtimeHost.cancelActiveTurns();
@@ -968,6 +1043,13 @@ async function start() {
     return installedRuntimeRoot;
   };
   installedRuntimeRoot = runtimeRootProvider();
+  const launcherBuildPath = app.isPackaged
+    ? path.join(process.resourcesPath, "build-info.json")
+    : path.join(SOURCE_ROOT, "launcher", "build", "build-info.json");
+  launcherBuildInfo = readBuildInfoFile(launcherBuildPath);
+  const runtimeMetadata = readRuntimeBuildMetadata(installedRuntimeRoot);
+  runtimeBuildInfo = runtimeMetadata.buildInfo;
+  runtimeBundleId = runtimeMetadata.bundleId;
 
   cdpPort = await findFreePort();
   if (process.platform === "linux") {
@@ -1074,6 +1156,7 @@ async function start() {
     platform: process.platform,
     arch: process.arch,
     packaged: app.isPackaged && !IS_DEV_PROFILE,
+    buildInfo: launcherBuildInfo,
     executablePath: process.execPath,
     runtimeExecutable: updaterRuntimeRoot
       ? runtimeBundlePaths(updaterRuntimeRoot, process.platform).executable
@@ -1127,6 +1210,9 @@ async function start() {
       platform: process.platform,
       packaged: app.isPackaged,
       runtimeVerified: true,
+      launcherBuild: launcherBuildInfo,
+      runtimeBuild: runtimeBuildInfo,
+      runtimeBundleId,
     })}\n`);
     browserHost.destroy();
     await browserControl.close();

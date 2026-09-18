@@ -13,6 +13,7 @@ import { createPortal } from "react-dom";
 import { copyFor, localizeRuntimeMessage, type Copy } from "./i18n";
 import { Icon, type IconName } from "./icons";
 import type {
+  BuildInfo,
   BrowserInteractionMode,
   BrowserState,
   DoctorReport,
@@ -1586,6 +1587,12 @@ function SettingsSurface({
   const [busy, setBusy] = useState(false);
   const [turnsCancelled, setTurnsCancelled] = useState(false);
   const [integrationRemoved, setIntegrationRemoved] = useState(false);
+  const buildMismatch = snapshot.launcherBuild !== null
+    && snapshot.runtimeBuild !== null
+    && buildIdentitiesDiffer(snapshot.launcherBuild, snapshot.runtimeBuild);
+  const updaterDisabledReason = snapshot.update.status === "disabled" && "reason" in snapshot.update
+    ? snapshot.update.reason
+    : null;
 
   const updateLanguage = async (next: Language) => {
     try {
@@ -1716,6 +1723,32 @@ function SettingsSurface({
         </NoticeRow>
       ) : null}
 
+      <SectionHeading label={copy.buildIdentity} spaced />
+      <div className="build-identity-grid">
+        <BuildIdentityCard build={snapshot.launcherBuild} copy={copy} title={copy.launcherBuild} />
+        <BuildIdentityCard
+          build={snapshot.runtimeBuild}
+          bundleId={snapshot.runtimeBundleId}
+          copy={copy}
+          title={copy.runtimeBuild}
+        />
+      </div>
+      {buildMismatch ? (
+        <NoticeRow icon="alert" tone="warning">
+          {copy.buildMismatch}
+        </NoticeRow>
+      ) : null}
+      {updaterDisabledReason === "custom-build" ? (
+        <NoticeRow icon="alert" tone="warning">
+          {copy.customUpdaterDisabled}
+        </NoticeRow>
+      ) : null}
+      {updaterDisabledReason === "unknown-build" ? (
+        <NoticeRow icon="alert" tone="warning">
+          {copy.unknownUpdaterDisabled}
+        </NoticeRow>
+      ) : null}
+
       <SectionHeading label={copy.diagnostics} spaced />
       <button className="diagnostic-row" disabled={busy} onClick={() => void runDoctor()} type="button">
         <Icon name="activity" />
@@ -1755,6 +1788,61 @@ function SettingsSurface({
       </div>
     </ContentSurface>
   );
+}
+
+function BuildIdentityCard({
+  build,
+  bundleId,
+  copy,
+  title,
+}: {
+  build: BuildInfo | null;
+  bundleId?: string | null;
+  copy: Copy;
+  title: string;
+}) {
+  const revision = build?.sourceRevision ? build.sourceRevision.slice(0, 12) : copy.unknownBuild;
+  const sourceCondition = build?.dirty === false
+    ? copy.cleanBuild
+    : build?.dirty === true
+      ? copy.dirtyBuild
+      : copy.unknownBuild;
+
+  return (
+    <section className="build-identity-card">
+      <h3>{title}</h3>
+      <dl>
+        <div>
+          <dt>{copy.distribution}</dt>
+          <dd>{build?.distribution ?? copy.unknownBuild}</dd>
+        </div>
+        <div>
+          <dt>{copy.sourceRevision}</dt>
+          <dd className="build-identity-value">{revision}</dd>
+        </div>
+        <div>
+          <dt>{copy.sourceCondition}</dt>
+          <dd>{sourceCondition}</dd>
+        </div>
+        {bundleId !== undefined ? (
+          <div>
+            <dt>{copy.runtimeBundleId}</dt>
+            <dd className="build-identity-value">
+              {bundleId ? bundleId.slice(0, 12) : copy.unknownBuild}
+            </dd>
+          </div>
+        ) : null}
+      </dl>
+    </section>
+  );
+}
+
+function buildIdentitiesDiffer(launcher: BuildInfo, runtime: BuildInfo): boolean {
+  return launcher.schemaVersion !== runtime.schemaVersion
+    || launcher.distribution !== runtime.distribution
+    || launcher.repository !== runtime.repository
+    || launcher.sourceRevision !== runtime.sourceRevision
+    || launcher.dirty !== runtime.dirty;
 }
 
 function ContentSurface({

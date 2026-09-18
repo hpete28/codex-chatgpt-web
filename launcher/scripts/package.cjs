@@ -2,9 +2,15 @@ const { spawnSync } = require("node:child_process");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const {
+  inspectBuildInfo,
+  readBuildInfoFile,
+  sameBuildInfo,
+} = require("../electron/build-info.cjs");
 const { validateRuntimeBundle } = require("../electron/runtime-install.cjs");
 
 const root = path.resolve(__dirname, "..");
+const repositoryRoot = path.resolve(root, "..");
 const launcherManifest = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"));
 const executable = "node";
 const electronBuilderCli = require.resolve("electron-builder/out/cli/cli.js", { paths: [root] });
@@ -41,6 +47,16 @@ if (target === "--mac" && !env.CSC_LINK && !env.CSC_NAME) {
 
 const staging = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-package-"));
 const artifactsDirectory = path.join(root, "artifacts");
+
+const sourceBuild = inspectBuildInfo(repositoryRoot);
+if (!sourceBuild.sourceRevision || sourceBuild.dirty !== false) {
+  throw new Error("Custom package creation requires a clean committed source revision");
+}
+const launcherBuild = readBuildInfoFile(path.join(root, "build", "build-info.json"));
+const runtimeBuild = readBuildInfoFile(path.join(root, "build", "runtime", "app", "build-info.json"));
+if (!launcherBuild || !runtimeBuild || !sameBuildInfo(sourceBuild, launcherBuild) || !sameBuildInfo(sourceBuild, runtimeBuild)) {
+  throw new Error("Launcher and runtime build identities must match the current clean source revision before packaging");
+}
 
 function runChecked(command, args) {
   const result = spawnSync(command, args, {
