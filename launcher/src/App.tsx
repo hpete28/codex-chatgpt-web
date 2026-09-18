@@ -24,6 +24,20 @@ import type {
   Surface,
 } from "./types";
 
+type BuildIdentity = {
+  schemaVersion: 1;
+  distribution: "custom";
+  repository: "hpete28/codex-chatgpt-web";
+  sourceRevision: string | null;
+  dirty: boolean | null;
+};
+
+type BuildIdentitySnapshot = LauncherSnapshot & {
+  launcherBuild: BuildIdentity | null;
+  runtimeBuild: BuildIdentity | null;
+  runtimeBundleId: string | null;
+};
+
 const api = window.codexWebLauncher;
 const PANEL_TRANSITION = { duration: 0.3, ease: [0.16, 1, 0.3, 1] } as const;
 const COMPACT_SIDEBAR_QUERY = "(max-width: 820px)";
@@ -1586,6 +1600,13 @@ function SettingsSurface({
   const [busy, setBusy] = useState(false);
   const [turnsCancelled, setTurnsCancelled] = useState(false);
   const [integrationRemoved, setIntegrationRemoved] = useState(false);
+  const buildSnapshot = snapshot as BuildIdentitySnapshot;
+  const buildMismatch = buildSnapshot.launcherBuild !== null
+    && buildSnapshot.runtimeBuild !== null
+    && buildIdentitiesDiffer(buildSnapshot.launcherBuild, buildSnapshot.runtimeBuild);
+  const updaterDisabledReason = snapshot.update.status === "disabled" && "reason" in snapshot.update
+    ? snapshot.update.reason
+    : null;
 
   const updateLanguage = async (next: Language) => {
     try {
@@ -1716,6 +1737,32 @@ function SettingsSurface({
         </NoticeRow>
       ) : null}
 
+      <SectionHeading label={copy.buildIdentity} spaced />
+      <div className="build-identity-grid">
+        <BuildIdentityCard build={buildSnapshot.launcherBuild} copy={copy} title={copy.launcherBuild} />
+        <BuildIdentityCard
+          build={buildSnapshot.runtimeBuild}
+          bundleId={buildSnapshot.runtimeBundleId}
+          copy={copy}
+          title={copy.runtimeBuild}
+        />
+      </div>
+      {buildMismatch ? (
+        <NoticeRow icon="alert" tone="warning">
+          {copy.buildMismatch}
+        </NoticeRow>
+      ) : null}
+      {updaterDisabledReason === "custom-build" ? (
+        <NoticeRow icon="alert" tone="warning">
+          {copy.customUpdaterDisabled}
+        </NoticeRow>
+      ) : null}
+      {updaterDisabledReason === "unknown-build" ? (
+        <NoticeRow icon="alert" tone="warning">
+          {copy.unknownUpdaterDisabled}
+        </NoticeRow>
+      ) : null}
+
       <SectionHeading label={copy.diagnostics} spaced />
       <button className="diagnostic-row" disabled={busy} onClick={() => void runDoctor()} type="button">
         <Icon name="activity" />
@@ -1755,6 +1802,61 @@ function SettingsSurface({
       </div>
     </ContentSurface>
   );
+}
+
+function BuildIdentityCard({
+  build,
+  bundleId,
+  copy,
+  title,
+}: {
+  build: BuildIdentity | null;
+  bundleId?: string | null;
+  copy: Copy;
+  title: string;
+}) {
+  const revision = build?.sourceRevision ? build.sourceRevision.slice(0, 12) : copy.unknownBuild;
+  const sourceCondition = build?.dirty === false
+    ? copy.cleanBuild
+    : build?.dirty === true
+      ? copy.dirtyBuild
+      : copy.unknownBuild;
+
+  return (
+    <section className="build-identity-card">
+      <h3>{title}</h3>
+      <dl>
+        <div>
+          <dt>{copy.distribution}</dt>
+          <dd>{build?.distribution ?? copy.unknownBuild}</dd>
+        </div>
+        <div>
+          <dt>{copy.sourceRevision}</dt>
+          <dd className="build-identity-value">{revision}</dd>
+        </div>
+        <div>
+          <dt>{copy.sourceCondition}</dt>
+          <dd>{sourceCondition}</dd>
+        </div>
+        {bundleId !== undefined ? (
+          <div>
+            <dt>{copy.runtimeBundleId}</dt>
+            <dd className="build-identity-value">
+              {bundleId ? bundleId.slice(0, 12) : copy.unknownBuild}
+            </dd>
+          </div>
+        ) : null}
+      </dl>
+    </section>
+  );
+}
+
+function buildIdentitiesDiffer(launcher: BuildIdentity, runtime: BuildIdentity): boolean {
+  return launcher.schemaVersion !== runtime.schemaVersion
+    || launcher.distribution !== runtime.distribution
+    || launcher.repository !== runtime.repository
+    || launcher.sourceRevision !== runtime.sourceRevision
+    || launcher.dirty !== runtime.dirty;
 }
 
 function ContentSurface({
