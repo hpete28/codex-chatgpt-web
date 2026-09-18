@@ -96,6 +96,7 @@ class BrowserControlServer {
     const isTurn = request.url === "/v1/turn/start"
       || request.url === "/v1/turn/heartbeat"
       || request.url === "/v1/turn/end";
+    const isTurnObservation = request.url === "/v1/turn/observe";
     const isTurnRelease = request.url === "/v1/turn/release";
     const isSessionInspect = request.url === "/v1/session/inspect";
     const manualAction = new Map([
@@ -106,7 +107,7 @@ class BrowserControlServer {
       ["/v1/manual/end", "end"],
       ["/v1/manual/cancel", "cancel"],
     ]).get(request.url);
-    if (request.method !== "POST" || (!isTurn && !isTurnRelease && !isSessionInspect && !manualAction)) {
+    if (request.method !== "POST" || (!isTurn && !isTurnObservation && !isTurnRelease && !isSessionInspect && !manualAction)) {
       writeJson(response, 404, { error: "not_found" });
       return;
     }
@@ -175,6 +176,11 @@ class BrowserControlServer {
       }
       if (body.refreshViewport !== undefined && request.url !== "/v1/turn/heartbeat") {
         throw new Error("refreshViewport is only valid for a turn heartbeat");
+      }
+      if (isTurnObservation) {
+        const accepted = host.observeTurn(body.traceId, body.helperPid, body.observation);
+        writeJson(response, 200, { ok: true, accepted });
+        return;
       }
       if (manualAction) {
         if (manualAction === "start") {

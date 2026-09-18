@@ -26,6 +26,7 @@ test("daemon streams browser lifecycle through the real helper process", async (
       await turn.onMultipartStageAcknowledged?.(1);
       await turn.onMultipartStageAcknowledged?.(2);
       await turn.onMultipartStageAcknowledged?.(3);
+      turn.onStalledResponseStopped?.();
       await turn.onSendActivated();
       turn.onSubmitted();
       turn.onReasoningSummary("Reading project");
@@ -80,9 +81,10 @@ test("daemon streams browser lifecycle through the real helper process", async (
   const reasoning: Array<{ text: string; continuation: boolean }> = [];
   const deltas: string[] = [];
   const checkpoints: unknown[] = [];
-  const acknowledgedStages: number[] = [];
+  const acknowledgedStages: Array<[number, number | undefined]> = [];
   let sendActivated = false;
   let submitted = false;
+  let stalledResponseStopped = false;
   let released = false;
   const client = new LauncherBrowserHelperClient(config);
   try {
@@ -96,7 +98,8 @@ test("daemon streams browser lifecycle through the real helper process", async (
         multipart: { parts: ["part one", "part two", "part three"], commit: "inspect" },
         release: () => { released = true; },
       }),
-      onMultipartStageAcknowledged: stage => { acknowledgedStages.push(stage); },
+      onMultipartStageAcknowledged: (stage, total) => { acknowledgedStages.push([stage, total]); },
+      onStalledResponseStopped: () => { stalledResponseStopped = true; },
       onSendActivated: () => { sendActivated = true; },
       onSubmitted: () => { submitted = true; },
       onReasoningSummary: (text, continuation) => reasoning.push({ text, continuation: continuation === true }),
@@ -112,7 +115,8 @@ test("daemon streams browser lifecycle through the real helper process", async (
     expect(deltas).toEqual(["done"]);
     expect(sendActivated).toBe(true);
     expect(submitted).toBe(true);
-    expect(acknowledgedStages).toEqual([1, 2, 3]);
+    expect(acknowledgedStages).toEqual([[1, 3], [2, 3], [3, 3]]);
+    expect(stalledResponseStopped).toBe(true);
     expect(checkpoints).toEqual([{
       answerHash: "a".repeat(64),
       checkpoint: {

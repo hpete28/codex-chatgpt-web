@@ -53,6 +53,7 @@ contextBridge.exposeInMainWorld("codexWebLauncher", {
   onWindowStateChanged: (listener) => subscription("launcher:window-state-changed", listener),
   onStateChanged: (listener) => subscription("launcher:state-changed", listener),
   onBrowserState: (listener) => subscription("launcher:browser-state", listener),
+  onTurnObservations: (listener) => subscription("launcher:turn-observations", listener),
   onOperation: (listener) => subscription("launcher:operation", listener),
   onLog: (listener) => subscription("launcher:log", listener),
   onUpdateState: (listener) => subscription("launcher:update-state", listener),

@@ -273,6 +273,11 @@ async function run(message: RunMessage): Promise<void> {
         throw new Error("Browser helper could not persist ChatGPT submission evidence");
       }
     },
+    onStalledResponseStopped: () => {
+      if (!writeProtocol({ type: "event", id: message.id, event: "stalled_response_stopped" })) {
+        throw new Error("Browser helper could not persist stalled-response recovery evidence");
+      }
+    },
     onMultipartStageAcknowledged: stageIndex => {
       if (!writeProtocol({ type: "event", id: message.id, event: "multipart_stage_acknowledged", stageIndex })) {
         throw new Error("Browser helper could not persist multipart acknowledgement evidence");
@@ -517,4 +522,7 @@ process.once("SIGTERM", () => {
 });
 
 // Advertise the optional frames this helper understands so the daemon can negotiate them explicitly.
-writeProtocol({ type: "ready", features: ["progress", "tool-boundary-ack", "completion-fence", "multipart-stage-ack"] });
+writeProtocol({
+  type: "ready",
+  features: ["progress", "tool-boundary-ack", "completion-fence", "multipart-stage-ack", "stalled-response-stop"],
+});

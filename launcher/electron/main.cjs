@@ -545,6 +545,7 @@ function registerIpc({ logger, stateStore }) {
     },
     state: stateStore.read(),
     browser: browserHost?.snapshot() ?? null,
+    turnObservations: browserHost?.turnObservations() ?? [],
     connectorName: runtimeHost.browserConnectorName(),
     connectorNames: {
       automatic: runtimeHost.setupConnectorName(),
@@ -1145,7 +1146,10 @@ async function start() {
     loginWithPasskey: () => runtimeHost.capturePasskeyLogin(),
     partition: LAUNCHER_PROFILE.browserPartition,
     profile: LAUNCHER_PROFILE.kind,
-    publishState: (state) => send("launcher:browser-state", state),
+    publishState: (state) => {
+      send("launcher:browser-state", state);
+      send("launcher:turn-observations", browserHost?.turnObservations() ?? []);
+    },
     showWindow: showMainWindow,
     getBrowserInteractionMode: () => stateStore.read().browserInteractionMode,
   });

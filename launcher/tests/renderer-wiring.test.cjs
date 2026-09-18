@@ -33,6 +33,28 @@ test("settings explain why the public updater is disabled for non-public builds"
   assert.doesNotMatch(appSource, /hpete28\/codex-chatgpt-web\/releases/);
 });
 
+test("activity renders validated turn observations without deriving semantic progress from logs", () => {
+  assert.match(appSource, /const \[turnObservations, setTurnObservations\] = useState<TurnObservation\[\]>\(\[\]\)/);
+  assert.match(appSource, /setTurnObservations\(next\.turnObservations\)/);
+  assert.match(appSource, /api\.onTurnObservations\(setTurnObservations\)/);
+  assert.match(appSource, /unsubscribeTurnObservations\(\)/);
+  assert.match(appSource, /turnObservations=\{turnObservations\}/);
+  assert.match(appSource, /turnObservations:\s*TurnObservation\[\]/);
+  assert.match(appSource, /const newestTraceId = turnObservations\.at\(-1\)\?\.traceId \?\? ""/);
+  assert.match(appSource, /latestTurnObservations\.some\(\(observation\) => observation\.traceId === current\)/);
+  assert.match(appSource, /selectedObservation\.phase/);
+  assert.match(appSource, /formatTime\(selectedObservation\.at, language\)/);
+  assert.match(appSource, /selectedObservation\.acknowledgedParts !== undefined[\s\S]*?selectedObservation\.totalParts !== undefined[\s\S]*?acknowledgedParts\}\/\$\{selectedObservation\.totalParts\}/);
+  assert.match(appSource, /selectedObservation\.continuationCount \?\? copy\.unavailable/);
+  assert.match(appSource, /\["finished", "cancelled", "failed"\]\.includes\(selectedObservation\.phase\)/);
+  assert.match(appSource, /copy\.modelReportedWorkState[\s\S]*?selectedObservation\.workState/);
+  assert.match(appSource, /copy\.noTurnObservations/);
+  assert.doesNotMatch(appSource, /turnObservations[\s\S]{0,200}(percent|eta|stall)/i);
+  assert.equal((i18nSource.match(/modelReportedWorkState:/g) || []).length, 5);
+  assert.equal((i18nSource.match(/noTurnObservations:/g) || []).length, 5);
+  assert.match(stylesSource, /\.turn-observation-summary\s*\{[^}]*grid-template-columns:\s*repeat\(3, minmax\(0, 1fr\)\);/s);
+});
+
 test("embedded ChatGPT is measured only after its animated surface mounts", () => {
   assert.match(appSource, /const \[browserSlot, setBrowserSlot\] = useState<HTMLDivElement \| null>\(null\)/);
   assert.match(appSource, /setBrowserSurfaceActive\(browserSurfaceActive\)\.then\(\(\) => \{/);

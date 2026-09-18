@@ -90,6 +90,17 @@ export interface BuildInfo {
   dirty: boolean | null;
 }
 
+export interface TurnObservation {
+  traceId: string;
+  sequence: number;
+  at: string;
+  phase: "preparing" | "staging" | "responding" | "tools" | "recovering" | "continuing" | "compacting" | "finished" | "cancelled" | "failed";
+  acknowledgedParts?: number;
+  totalParts?: number;
+  continuationCount?: number;
+  workState?: "continue" | "complete" | "blocked";
+}
+
 export interface OperationState {
   name: string;
   status: "running" | "completed" | "failed";
@@ -111,6 +122,7 @@ export interface LauncherSnapshot {
   };
   state: LauncherState;
   browser: BrowserState | null;
+  turnObservations: TurnObservation[];
   connectorName: string;
   connectorNames: Record<BrowserInteractionMode, string>;
   mcpCredentialsConfigured: boolean;
@@ -188,6 +200,7 @@ export interface LauncherApi {
   onWindowStateChanged(listener: (state: { fullScreen: boolean; maximized: boolean }) => void): () => void;
   onStateChanged(listener: (state: LauncherState) => void): () => void;
   onBrowserState(listener: (state: BrowserState) => void): () => void;
+  onTurnObservations(listener: (observations: TurnObservation[]) => void): () => void;
   onOperation(listener: (state: OperationState) => void): () => void;
   onLog(listener: (record: LogRecord) => void): () => void;
   onUpdateState(listener: (state: UpdateState) => void): () => void;
