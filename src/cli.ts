@@ -24,6 +24,7 @@ import { formatDoctorReport, runDoctor } from "./doctor";
 import { runChatGptMcpMain } from "./adapters/chatgpt-web/mcp-main";
 import { runCommand } from "./process";
 import { startServer } from "./server";
+import { webOnlySpawnHook } from "./web-only-subagents";
 import { assertServiceIdle, cancelActiveTurns, getServiceStatus, installService, interruptActiveTurn, restartService, startService, stopService, uninstallService } from "./service";
 import { existingFullSetupCredentials, preflightSetup, setup, type SetupOptions } from "./setup";
 import { installRuntimeKeyBytes, managedRuntimeKeyPath, stopTunnel, tunnelStatus, waitForTunnelReady } from "./tunnel";
@@ -464,6 +465,27 @@ async function interruptHookCommand(args: string[]): Promise<void> {
   await interruptActiveTurn(loadConfig(), { threadId, turnId });
 }
 
+async function webOnlySubagentHookCommand(args: string[]): Promise<void> {
+  assertNoArgs(args);
+  try {
+    const chunks: Buffer[] = [];
+    let bytes = 0;
+    for await (const chunk of stdin) {
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      bytes += buffer.length;
+      if (bytes > 1024 * 1024) throw new Error("hook input exceeds 1 MiB");
+      chunks.push(buffer);
+    }
+    stdout.write(`${JSON.stringify(webOnlySpawnHook(JSON.parse(Buffer.concat(chunks).toString("utf8")), loadConfig()))}\n`);
+  } catch (error) {
+    // Hook errors normally fail open in Codex. Return a supported explicit denial instead.
+    stdout.write(`${JSON.stringify({ hookSpecificOutput: {
+      hookEventName: "PreToolUse", permissionDecision: "deny",
+      permissionDecisionReason: `Web-only subagent hook could not validate the call: ${error instanceof Error ? error.message : String(error)}`,
+    } })}\n`);
+  }
+}
+
 async function tunnelCommand(args: string[]): Promise<void> {
   const action = args.shift() ?? "status";
   assertNoArgs(args);
@@ -592,8 +614,9 @@ async function main(): Promise<void> {
   else if (command === "service") await serviceCommand(args);
   else if (command === "hook") {
     const action = args.shift();
-    if (action !== "interrupt") throw new Error("Hook command must be: hook interrupt");
-    await interruptHookCommand(args);
+    if (action === "interrupt") await interruptHookCommand(args);
+    else if (action === "web-only-subagents") await webOnlySubagentHookCommand(args);
+    else throw new Error("Hook command must be: hook interrupt or hook web-only-subagents");
   }
   else if (command === "tunnel") await tunnelCommand(args);
   else if (command === "open") await openCommand(args);

@@ -28,6 +28,10 @@ Use the ChatGPT Web models available on your account, including Pro, from Codexâ
 
 Full harness mode connects ChatGPT to the current taskâ€™s files, terminal, tools, and approvals through MCP. Conversations stay tied to your Codex task, so you can keep working as the context grows.
 
+Custom fork: [Web-only subagent provider safeguards](docs/web-only-subagents.md) are opt-in.
+They reject native requests on a dedicated provider before forwarding; creation-time
+enforcement requires client support and is not verified on the installed client.
+
 <div id="get-started"><a id="quick-start"></a></div>
 
 ## Get started

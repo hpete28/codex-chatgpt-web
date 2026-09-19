@@ -1,4 +1,5 @@
 import { readJsonRequestBody } from "./http-body";
+import { isWebOnlyCredential } from "./web-only-subagents";
 import {
   BRIDGE_COMPACTION_PREFIX,
   SUMMARY_PREFIX,
@@ -211,6 +212,9 @@ export async function forwardNativeCodexRequest(
   fetchUpstream: NativeFetch = fetchNativeCodex,
   decodedBody?: unknown,
 ): Promise<Response> {
+  if (isWebOnlyCredential(request) || new URL(request.url).pathname.startsWith("/web-only/")) {
+    throw new Error("Web-only provider capabilities cannot authorize native Codex passthrough");
+  }
   const authorization = request.headers.get("authorization") ?? "";
   if (!authorization.startsWith("Bearer ") || authorization.length <= "Bearer ".length) {
     throw new Error("Native Codex passthrough requires the incoming Bearer authorization");

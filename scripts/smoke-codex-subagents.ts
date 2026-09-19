@@ -4,13 +4,18 @@ import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { bridgeToResponsesSSE } from "../src/bridge";
 import { defaultConfig } from "../src/config";
-import { augmentNativeModelCatalog } from "../src/model-catalog";
+import { augmentNativeModelCatalog, buildWebOnlyModelCatalog } from "../src/model-catalog";
 import type { AdapterEvent } from "../src/types";
 
 const protocol = process.argv.includes("--v1") ? "v1" : "v2";
-const explicitChildModel = "gpt-5.6-sol";
-const explicitChildReasoningEffort = "max";
-const codexArg = process.argv.slice(2).find(argument => argument !== "--v1" && argument !== "--v2");
+const webOnly = process.argv.includes("--web-only");
+const inheritedModel = process.argv.includes("--inherit-model");
+const checkDepth = process.argv.includes("--check-depth");
+const rootModel = webOnly ? "chatgpt-web/high" : "chatgpt-web/pro";
+const explicitChildModel = webOnly ? rootModel : "gpt-5.6-sol";
+const explicitChildReasoningEffort = webOnly ? "high" : "max";
+const childModelArgs = inheritedModel ? {} : { model: explicitChildModel, reasoning_effort: explicitChildReasoningEffort };
+const codexArg = process.argv.slice(2).find(argument => !argument.startsWith("--"));
 const codex = resolve(codexArg ?? "/Applications/ChatGPT.app/Contents/Resources/codex");
 if (!existsSync(codex)) throw new Error(`Codex executable is missing: ${codex}`);
 
@@ -28,7 +33,7 @@ const catalogConfig = defaultConfig("browser-only");
 catalogConfig.solAvailable = true;
 catalogConfig.proAvailable = true;
 catalogConfig.subagentProtocol = protocol === "v1" ? "compatibility-v1" : "native";
-const catalog = augmentNativeModelCatalog(sourceCatalog, catalogConfig);
+const catalog = (webOnly ? buildWebOnlyModelCatalog : augmentNativeModelCatalog)(sourceCatalog, catalogConfig);
 
 const root = join(tmpdir(), `codex-chatgpt-web-subagents-${process.pid}-${Date.now()}`);
 const codexHome = join(root, "codex");
@@ -175,14 +180,12 @@ function responseFor(role: Role, step: number, body: Record<string, unknown>): A
     if (step === 0) return toolCall("spawn_agent", protocol === "v1" ? {
       message: "CHILD_LIFECYCLE: spawn the requested grandchild, wait for it, then report success.",
       fork_context: false,
-      model: explicitChildModel,
-      reasoning_effort: explicitChildReasoningEffort,
+      ...childModelArgs,
     } : {
       task_name: "lifecycle_child",
       message: "CHILD_LIFECYCLE: spawn the requested grandchild, wait for it, then report success.",
       fork_turns: "none",
-      model: explicitChildModel,
-      reasoning_effort: explicitChildReasoningEffort,
+      ...childModelArgs,
     });
     if (step === 1) return toolCall("wait_agent", protocol === "v1"
       ? { targets: [spawnedAgentId(body)], timeout_ms: 500 }
@@ -204,20 +207,31 @@ function responseFor(role: Role, step: number, body: Record<string, unknown>): A
     if (step === 0) return toolCall("spawn_agent", protocol === "v1" ? {
       message: "GRANDCHILD_LIFECYCLE: reply with GRANDCHILD_LIFECYCLE_OK.",
       fork_context: false,
-      model: explicitChildModel,
-      reasoning_effort: explicitChildReasoningEffort,
+      ...childModelArgs,
     } : {
       task_name: "lifecycle_grandchild",
       message: "GRANDCHILD_LIFECYCLE: reply with GRANDCHILD_LIFECYCLE_OK.",
       fork_turns: "none",
-      model: explicitChildModel,
-      reasoning_effort: explicitChildReasoningEffort,
+      ...childModelArgs,
     });
     if (step === 1) return toolCall("wait_agent", protocol === "v1"
       ? { targets: [spawnedAgentId(body)], timeout_ms: 500 }
       : { timeout_ms: 500 });
     if (step === 2) return finalAnswer("CHILD_LIFECYCLE_OK");
     return finalAnswer("CHILD_FOLLOWUP_OK");
+  }
+  if (checkDepth && step === 0) return toolCall("spawn_agent", protocol === "v1"
+    ? { message: "DEPTH_OVERFLOW_MUST_NOT_RUN", ...childModelArgs }
+    : { task_name: "depth_overflow", message: "DEPTH_OVERFLOW_MUST_NOT_RUN", fork_turns: "none", ...childModelArgs });
+  if (checkDepth) {
+    const outputs = Array.isArray(body.input) ? body.input.filter(item => item && typeof item === "object"
+      && (item as { type?: unknown }).type === "function_call_output") : [];
+    const last = outputs.at(-1) as { output?: unknown } | undefined;
+    // V1 removes spawn from the depth-limited registry instead of returning a depth error.
+    if (typeof last?.output !== "string" || (!/depth|not available|unrecognized/i.test(last.output)
+      && last.output !== "unsupported call: multi_agent_v1spawn_agent")) {
+      failures.push(`Maximum-depth rejection was not confirmed: ${String(last?.output)}`);
+    }
   }
   return finalAnswer("GRANDCHILD_LIFECYCLE_OK");
 }
@@ -233,6 +247,9 @@ const server = Bun.serve({
     }
     try {
       const body = await request.json() as Record<string, unknown>;
+      if (webOnly && body.model !== explicitChildModel) {
+        throw new Error(`Web-only mock refuses unexpected effective model ${String(body.model)}`);
+      }
       const role = roleOf(body);
       const step = steps.get(role) ?? 0;
       steps.set(role, step + 1);
@@ -278,7 +295,7 @@ const server = Bun.serve({
       }
       return new Response(bridgeToResponsesSSE(
         responseFor(role, step, body),
-        "chatgpt-web/pro",
+        rootModel,
         collaborationMap,
       ), {
         headers: {
@@ -294,7 +311,7 @@ const server = Bun.serve({
 });
 
 writeFileSync(join(codexHome, "config.toml"), [
-  'model = "chatgpt-web/pro"',
+  `model = ${JSON.stringify(rootModel)}`,
   'model_provider = "lifecycle"',
   `model_catalog_json = ${JSON.stringify(join(root, "models.json"))}`,
   "",
@@ -329,7 +346,7 @@ try {
     "--json",
     "--dangerously-bypass-approvals-and-sandbox",
     "--model",
-    "chatgpt-web/pro",
+    rootModel,
     "ROOT_LIFECYCLE: complete the nested subagent lifecycle and the follow-up.",
   ], {
     cwd: root,
@@ -368,7 +385,7 @@ try {
     if (firstRequest?.model !== explicitChildModel) {
       failures.push(`${role} used ${firstRequest?.model ?? "no model"}, expected ${explicitChildModel}`);
     }
-    if (firstRequest?.reasoningEffort !== explicitChildReasoningEffort) {
+    if (!inheritedModel && firstRequest?.reasoningEffort !== explicitChildReasoningEffort) {
       failures.push(
         `${role} used reasoning ${firstRequest?.reasoningEffort ?? "none"}, expected ${explicitChildReasoningEffort}`,
       );
@@ -381,7 +398,7 @@ try {
         + `\nCodex stdout: ${stdout.slice(-8_000)}\nCodex stderr: ${stderr.slice(-8_000)}`,
     );
   }
-  process.stdout.write(`CODEX_SUBAGENT_${protocol.toUpperCase()}_LIFECYCLE_SMOKE_OK ${JSON.stringify([...observed].toSorted())}\n`);
+  process.stdout.write(`CODEX_SUBAGENT_${protocol.toUpperCase()}_LIFECYCLE_SMOKE_OK webOnly=${webOnly} inherited=${inheritedModel} ${JSON.stringify([...observed].toSorted())}\n`);
 } finally {
   await server.stop(true);
   rmSync(root, { recursive: true, force: true });

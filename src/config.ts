@@ -8,6 +8,7 @@ import {
   CHATGPT_WEB_ZERO_RISK_PRO_BACKEND_MODEL,
 } from "./chatgpt-web-models";
 import type { CodexProviderConfig } from "./types";
+import { validateWebOnlySubagents, type WebOnlySubagents } from "./web-only-subagents";
 import { VERSION } from "./version";
 
 export type RuntimeMode = "browser-only" | "full";
@@ -68,6 +69,8 @@ export interface AppConfig {
   releaseVersion: string;
   mode: RuntimeMode;
   subagentProtocol: SubagentProtocol;
+  /** Opt-in capability for a separate Web-only provider; ordinary native/mixed tasks are unchanged. */
+  webOnlySubagents?: WebOnlySubagents;
   host: "127.0.0.1";
   port: number;
   contextWindow: number;
@@ -377,6 +380,7 @@ function parseConfig(value: unknown, path: string): AppConfig {
   if (typeof parsed.releaseVersion !== "string" || !parsed.releaseVersion.trim()) throw new Error(`Missing releaseVersion in ${path}`);
   if (parsed.mode !== "browser-only" && parsed.mode !== "full") throw new Error(`Invalid runtime mode in ${path}`);
   const subagentProtocol = parsed.subagentProtocol ?? "compatibility-v1";
+  validateWebOnlySubagents(parsed.webOnlySubagents);
   if (subagentProtocol !== "compatibility-v1" && subagentProtocol !== "native") {
     throw new Error(`Invalid subagentProtocol in ${path}`);
   }

@@ -195,3 +195,9 @@ export function augmentNativeModelCatalog(
     models: [...nativeModels, ...webModels],
   };
 }
+
+/** Only the dedicated provider gets this roster; preserve the normal bounded native/Web registry. */
+export function buildWebOnlyModelCatalog(value: unknown, config: AppConfig): JsonObject {
+  const catalog = augmentNativeModelCatalog(value, config);
+  return { ...catalog, models: (catalog.models as JsonObject[]).filter(model => slug(model)?.startsWith(CHATGPT_WEB_MODEL_PREFIX)) };
+}

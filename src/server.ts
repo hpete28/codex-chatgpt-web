@@ -2,6 +2,8 @@ import { chatGptWebTraceId, createChatGptWebAdapter } from "./adapters/chatgpt-w
 import { closeChatGptBrowserWorkers } from "./adapters/chatgpt-web/browser-worker";
 import { closeTurnBrokers, TurnBroker } from "./adapters/chatgpt-web/turn-broker";
 import { timingSafeEqual } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { webOnlyRequestPolicy, webOnlyModelRejection } from "./web-only-subagents";
 import { chatGptTurnSessions } from "./adapters/chatgpt-web/turn-execution";
 import {
   cancelAllStructuredCompactions,
@@ -23,10 +25,11 @@ import { AsyncEventQueue } from "./event-queue";
 import { readJsonRequestBody } from "./http-body";
 import { httpStatusFromTerminalError } from "./lib/errors";
 import { createHash } from "node:crypto";
-import { augmentNativeModelCatalog } from "./model-catalog";
+import { augmentNativeModelCatalog, buildWebOnlyModelCatalog } from "./model-catalog";
 import {
   readCodexModelContextOverride,
   readCodexSubagentProtocol,
+  getCodexModelsCachePath,
   type CodexModelContextOverride,
 } from "./codex-integration";
 import {
@@ -484,6 +487,8 @@ export async function responseRequest(
   const requestedModel = raw && typeof raw === "object" && !Array.isArray(raw)
     ? (raw as { model?: unknown }).model
     : undefined;
+  const policyRejection = webOnlyModelRejection(req, config, requestedModel);
+  if (policyRejection) return policyRejection;
   try {
     const identity = extractCodexTurnIdentityFromBody(raw);
     if (identity.threadId && identity.turnId) {
@@ -691,6 +696,8 @@ export async function compactRequest(
     );
   }
   const headerTurnMetadata = req.headers.get("x-codex-turn-metadata");
+  const policyRejection = webOnlyModelRejection(req, config, raw.model);
+  if (policyRejection) return policyRejection;
   if (headerTurnMetadata) {
     const existingMetadata = raw.client_metadata;
     const clientMetadata = existingMetadata && typeof existingMetadata === "object" && !Array.isArray(existingMetadata)
@@ -829,6 +836,20 @@ export function startServer(
     idleTimeout: 0,
     async fetch(req) {
       const url = new URL(req.url);
+      const policy = webOnlyRequestPolicy(req, config);
+      if (policy.rejection) return policy.rejection;
+      if (policy.protected && url.pathname.startsWith("/web-only/")) {
+        url.pathname = url.pathname.slice("/web-only".length);
+      }
+      if (policy.protected && req.method === "GET" && url.pathname === "/v1/models") {
+        try {
+          // Never send the local provider capability to OpenAI. Reuse the local native template.
+          const cached = JSON.parse(readFileSync(getCodexModelsCachePath(), "utf8"));
+          return Response.json(buildWebOnlyModelCatalog(cached, config));
+        } catch {
+          return formatErrorResponse(409, "web_only_subagent_policy", "No usable local model catalog. Configure model_catalog_json with a Web-only catalog prepared from this Codex client's bundled models, then start a fresh task.");
+        }
+      }
       if (req.method === "GET" && url.pathname === "/healthz") {
         return Response.json({
           status: "ok",
