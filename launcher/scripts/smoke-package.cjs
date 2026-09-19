@@ -2,6 +2,10 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
+const {
+  readBuildInfoFile,
+  sameBuildInfo,
+} = require("../electron/build-info.cjs");
 const { validateRuntimeBundle } = require("../electron/runtime-install.cjs");
 
 const launcherRoot = path.resolve(__dirname, "..");
@@ -10,6 +14,8 @@ const launcherManifest = JSON.parse(
   fs.readFileSync(path.join(launcherRoot, "package.json"), "utf8"),
 );
 const expectedVersion = launcherManifest.version;
+const electronBuilderCli = require.resolve("electron-builder/out/cli/cli.js", { paths: [launcherRoot] });
+const isolatedWindowsSmoke = process.env.CODEX_WEB_GPT_SMOKE_ISOLATED === "1";
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-package-smoke-"));
 const markerPath = path.join(scratch, "ready.json");
 const coreHome = path.join(scratch, "core-home");
@@ -71,6 +77,27 @@ function smokeEnvironment() {
   };
 }
 
+function stageIsolatedWindowsPackage(env) {
+  const output = path.join(scratch, "windows-package");
+  const builderEnv = { ...env };
+  if (!builderEnv.CSC_LINK && !builderEnv.CSC_NAME) {
+    builderEnv.CSC_IDENTITY_AUTO_DISCOVERY = "false";
+  }
+  run("node", [
+    electronBuilderCli,
+    "--win",
+    "--dir",
+    "--publish",
+    "never",
+    `--config.directories.output=${output}`,
+  ], {
+    cwd: launcherRoot,
+    env: builderEnv,
+    timeout: 120_000,
+  });
+  return path.join(output, "win-unpacked", `${launcherManifest.build.productName}.exe`);
+}
+
 try {
   let executable;
   let command;
@@ -96,9 +123,13 @@ try {
     args = ["-a", executable, "--launcher-smoke-test"];
     env.APPIMAGE_EXTRACT_AND_RUN = "1";
   } else if (process.platform === "win32") {
-    const installer = artifact(/-win-x64\.exe$/, "Windows installer");
-    run(installer, ["/S", "/currentuser"], { timeout: 120_000 });
-    executable = path.join(windowsInstallLocation(), `${launcherManifest.build.productName}.exe`);
+    if (isolatedWindowsSmoke) {
+      executable = stageIsolatedWindowsPackage(env);
+    } else {
+      const installer = artifact(/-win-x64\.exe$/, "Windows installer");
+      run(installer, ["/S", "/currentuser"], { timeout: 120_000 });
+      executable = path.join(windowsInstallLocation(), `${launcherManifest.build.productName}.exe`);
+    }
     command = executable;
     args = ["--launcher-smoke-test"];
   } else {
@@ -106,14 +137,18 @@ try {
   }
 
   if (!fs.existsSync(executable)) throw new Error(`Packaged launcher executable is missing: ${executable}`);
-  run(command, args, { env });
+  run(command, args, { env, timeout: 90_000 });
   if (!fs.existsSync(markerPath)) throw new Error("Packaged launcher did not write its readiness marker");
   const marker = JSON.parse(fs.readFileSync(markerPath, "utf8"));
   if (marker.ok !== true
     || marker.packaged !== true
     || marker.runtimeVerified !== true
     || marker.version !== expectedVersion
-    || marker.platform !== process.platform) {
+    || marker.platform !== process.platform
+    || !marker.launcherBuild
+    || !marker.runtimeBuild
+    || !sameBuildInfo(marker.launcherBuild, marker.runtimeBuild)
+    || !/^[a-f0-9]{64}$/.test(marker.runtimeBundleId || "")) {
     throw new Error(`Unexpected packaged launcher marker: ${JSON.stringify(marker)}`);
   }
   const installedRuntime = path.join(
@@ -124,6 +159,7 @@ try {
   const installedManifest = JSON.parse(
     fs.readFileSync(path.join(installedRuntime, "manifest.json"), "utf8"),
   );
+  const installedRuntimeBuild = readBuildInfoFile(path.join(installedRuntime, "app", "build-info.json"));
   validateRuntimeBundle(installedRuntime, {
     version: expectedVersion,
     platform: process.platform,
@@ -135,7 +171,11 @@ try {
     || installedManifest.arch !== process.arch
     || !Array.isArray(installedManifest.files)
     || installedManifest.files.length === 0
-    || !/^[a-f0-9]{64}$/.test(installedManifest.bundleId)) {
+    || !/^[a-f0-9]{64}$/.test(installedManifest.bundleId)
+    || installedManifest.bundleId !== marker.runtimeBundleId
+    || !installedManifest.files.some(file => file?.path === "app/build-info.json")
+    || !installedRuntimeBuild
+    || !sameBuildInfo(marker.runtimeBuild, installedRuntimeBuild)) {
     throw new Error(`Packaged launcher installed the wrong durable runtime: ${JSON.stringify(installedManifest)}`);
   }
   process.stdout.write(`PACKAGED_LAUNCHER_SMOKE_OK ${process.platform}/${process.arch}\n`);

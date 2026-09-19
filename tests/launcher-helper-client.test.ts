@@ -28,6 +28,7 @@ test("daemon streams browser lifecycle through the real helper process", async (
       for (let index = 1; index <= prepared.multipart.parts.length; index++) {
         await turn.onMultipartStageAcknowledged?.(index);
       }
+      turn.onStalledResponseStopped?.();
       await turn.onSendActivated();
       turn.onSubmitted();
       turn.onReasoningSummary("Reading project");
@@ -82,9 +83,10 @@ test("daemon streams browser lifecycle through the real helper process", async (
   const reasoning: Array<{ text: string; continuation: boolean }> = [];
   const deltas: string[] = [];
   const checkpoints: unknown[] = [];
-  const acknowledgedStages: number[] = [];
+  const acknowledgedStages: Array<[number, number | undefined]> = [];
   let sendActivated = false;
   let submitted = false;
+  let stalledResponseStopped = false;
   let released = false;
   const client = new LauncherBrowserHelperClient(config);
   try {
@@ -101,7 +103,8 @@ test("daemon streams browser lifecycle through the real helper process", async (
         multipart: { parts: ["part one", "part two", "part three", "part four", "part five", "part six"], commit: "inspect" },
         release: () => { released = true; },
       }),
-      onMultipartStageAcknowledged: stage => { acknowledgedStages.push(stage); },
+      onMultipartStageAcknowledged: (stage, total) => { acknowledgedStages.push([stage, total]); },
+      onStalledResponseStopped: () => { stalledResponseStopped = true; },
       onSendActivated: () => { sendActivated = true; },
       onSubmitted: () => { submitted = true; },
       onReasoningSummary: (text, continuation) => reasoning.push({ text, continuation: continuation === true }),
@@ -117,7 +120,10 @@ test("daemon streams browser lifecycle through the real helper process", async (
     expect(deltas).toEqual(["done"]);
     expect(sendActivated).toBe(true);
     expect(submitted).toBe(true);
-    expect(acknowledgedStages).toEqual([1, 2, 3, 4, 5, 6]);
+    expect(acknowledgedStages).toEqual([
+      [1, 6], [2, 6], [3, 6], [4, 6], [5, 6], [6, 6],
+    ]);
+    expect(stalledResponseStopped).toBe(true);
     expect(checkpoints).toEqual([{
       answerHash: "a".repeat(64),
       checkpoint: {

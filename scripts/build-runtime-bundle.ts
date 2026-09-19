@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { createRequire } from "node:module";
 import {
   chmodSync,
   copyFileSync,
@@ -16,6 +17,16 @@ import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { VERSION } from "../src/version";
 
 const root = resolve(import.meta.dir, "..");
+const require = createRequire(import.meta.url);
+const { inspectBuildInfo } = require("../launcher/electron/build-info.cjs") as {
+  inspectBuildInfo(repositoryRoot: string): {
+    schemaVersion: 1;
+    distribution: "custom";
+    repository: "hpete28/codex-chatgpt-web";
+    sourceRevision: string | null;
+    dirty: boolean | null;
+  };
+};
 const packageJson = JSON.parse(readFileSync(join(root, "package.json"), "utf8")) as {
   version?: string;
   packageManager?: string;
@@ -65,6 +76,11 @@ const build = await Bun.build({
 if (!build.success) {
   throw new Error(`Runtime bundle failed: ${build.logs.map(log => log.message).join("; ")}`);
 }
+
+writeFileSync(
+  join(appDir, "build-info.json"),
+  `${JSON.stringify(inspectBuildInfo(root), null, 2)}\n`,
+);
 
 const browserHelperBuild = await Bun.build({
   entrypoints: [join(root, "src", "adapters", "chatgpt-web", "browser-helper-main.ts")],

@@ -35,6 +35,10 @@ test("launcher publishes native packages for all supported desktop operating sys
   assert.deepEqual(manifest.build.linux.target, ["AppImage"]);
   assert.ok(manifest.build.files.includes("assets/icon.png"));
   assert.ok(manifest.build.files.includes("assets/linux-appimage-runner.sh"));
+  assert.deepEqual(
+    manifest.build.extraResources.find((entry) => entry.to === "build-info.json"),
+    { from: "build/build-info.json", to: "build-info.json" },
+  );
   assert.ok(manifest.build.asarUnpack.includes("assets/linux-appimage-runner.sh"));
   assert.equal(manifest.build.afterPack, undefined);
   assert.ok(fs.existsSync(path.join(launcherRoot, "assets", "icon.ico")));
@@ -43,6 +47,24 @@ test("launcher publishes native packages for all supported desktop operating sys
   assert.equal(manifest.build.nsis.allowElevation, false);
   assert.equal(manifest.build.nsis.runAfterFinish, true);
   assert.match(manifest.build.nsis.guid, /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/);
+});
+
+test("custom packages bind launcher and runtime provenance to one clean revision", () => {
+  const builder = fs.readFileSync(path.join(repositoryRoot, "scripts", "build-runtime-bundle.ts"), "utf8");
+  const identity = fs.readFileSync(path.join(launcherRoot, "scripts", "generate-build-info.cjs"), "utf8");
+  const packager = fs.readFileSync(path.join(launcherRoot, "scripts", "package.cjs"), "utf8");
+  const smoke = fs.readFileSync(path.join(launcherRoot, "scripts", "smoke-package.cjs"), "utf8");
+  assert.match(builder, /appDir, "build-info\.json"/);
+  assert.ok(
+    builder.indexOf('appDir, "build-info.json"') < builder.indexOf("const files = runtimeManifestFiles()"),
+    "runtime provenance must be written before the hashed manifest inventory is built",
+  );
+  assert.match(identity, /Custom package creation requires a clean committed source revision/);
+  assert.match(identity, /sameBuildInfo\(buildInfo, runtimeBuild\)/);
+  assert.match(packager, /sameBuildInfo\(sourceBuild, launcherBuild\)/);
+  assert.match(packager, /sameBuildInfo\(sourceBuild, runtimeBuild\)/);
+  assert.match(smoke, /app\/build-info\.json/);
+  assert.match(smoke, /sameBuildInfo\(marker\.launcherBuild, marker\.runtimeBuild\)/);
 });
 
 test("release installers resolve checksummed native launcher assets", () => {
@@ -100,6 +122,9 @@ test("release installers resolve checksummed native launcher assets", () => {
   const packageSmoke = fs.readFileSync(path.join(launcherRoot, "scripts", "smoke-package.cjs"), "utf8");
   assert.match(packageSmoke, /run\(installer, \["\/S", "\/currentuser"\]/);
   assert.match(packageSmoke, /reg\.exe[\s\S]*InstallLocation/);
+  assert.match(packageSmoke, /CODEX_WEB_GPT_SMOKE_ISOLATED/);
+  assert.match(packageSmoke, /"--dir"/);
+  assert.match(packageSmoke, /win-unpacked/);
 });
 
 test("packaged launcher owns a detached checksummed updater for every release platform", () => {

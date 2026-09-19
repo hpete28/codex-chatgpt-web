@@ -2,7 +2,12 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { existsSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { createInterface } from "node:readline";
-import { notifyLauncherTurn, readLauncherBrowserHostDescriptor } from "../../launcher-browser-host";
+import {
+  notifyLauncherTurn,
+  publishLauncherTurnObservation,
+  readLauncherBrowserHostDescriptor,
+  type TurnObservation,
+} from "../../launcher-browser-host";
 import { ChatGptCompactionHandoffAccepted, ChatGptWebAdapterError } from "./adapter-error";
 import type { CompiledChatGptWebPrompt } from "./prompt";
 import type { BrowserTurn, ResolvedBrowserConfig } from "./browser-worker";
@@ -28,6 +33,7 @@ type HelperMessage =
   | { type: "event"; id: string; event: "heartbeat" | "send_activated" | "submitted" | "reasoning" | "commentary" | "text"; text?: string; continuation?: boolean }
   | { type: "event"; id: string; event: "tool_batch_observed"; revision: number }
   | { type: "event"; id: string; event: "multipart_stage_acknowledged"; stageIndex: number }
+  | { type: "event"; id: string; event: "stalled_response_stopped" }
   | { type: "event"; id: string; event: "completion_fence_begin"; requestId: number }
   | { type: "event"; id: string; event: "completion_fence_commit"; requestId: number; revision: number }
   | { type: "event"; id: string; event: "prepared_selected"; reused: boolean }
@@ -114,7 +120,7 @@ function parseHelperMessage(line: string): HelperMessage {
       }
       return { type: "event", id: message.id, event, reused: message.reused };
     }
-    if (!["heartbeat", "send_activated", "submitted", "reasoning", "commentary", "text"].includes(String(event))) {
+    if (!["heartbeat", "send_activated", "submitted", "stalled_response_stopped", "reasoning", "commentary", "text"].includes(String(event))) {
       throw new Error("Launcher browser helper emitted an unknown event");
     }
     if (text !== undefined && typeof text !== "string") {
@@ -126,7 +132,7 @@ function parseHelperMessage(line: string): HelperMessage {
     return {
       type: "event",
       id: message.id,
-      event: event as "heartbeat" | "send_activated" | "submitted" | "reasoning" | "commentary" | "text",
+      event: event as "heartbeat" | "send_activated" | "submitted" | "stalled_response_stopped" | "reasoning" | "commentary" | "text",
       ...(text !== undefined ? { text: text as string } : {}),
       ...(continuation !== undefined ? { continuation: continuation as boolean } : {}),
     };
@@ -225,6 +231,11 @@ export class LauncherBrowserHelperClient {
     if (turn.externalProgress && !this.helperFeatures.has("completion-fence")) {
       throw new Error(
         "Launcher browser helper does not support the MCP completion fence; update or restart the launcher",
+      );
+    }
+    if (turn.onStalledResponseStopped && !this.helperFeatures.has("stalled-response-stop")) {
+      throw new Error(
+        "Launcher browser helper does not support stalled-response recovery forwarding; update or restart the launcher",
       );
     }
     return await new Promise<string>((resolveResult, rejectResult) => {
@@ -489,6 +500,7 @@ export class LauncherBrowserHelperClient {
         ));
       }
       else if (message.event === "submitted") pending.turn.onSubmitted?.();
+      else if (message.event === "stalled_response_stopped") pending.turn.onStalledResponseStopped?.();
       else if (message.event === "multipart_stage_acknowledged") {
         const multipart = pending.prepared?.multipart;
         if (!multipart
@@ -502,7 +514,7 @@ export class LauncherBrowserHelperClient {
           return;
         }
         pending.acknowledgedMultipartStage = message.stageIndex;
-        void Promise.resolve().then(() => pending.turn.onMultipartStageAcknowledged?.(message.stageIndex))
+        void Promise.resolve().then(() => pending.turn.onMultipartStageAcknowledged?.(message.stageIndex, multipart.parts.length))
           .catch(error => this.abortWithLocalFailure(
             message.id,
             error instanceof Error ? error : new Error(String(error)),
@@ -639,6 +651,16 @@ export class LauncherBrowserHelperClient {
     pending.prepared?.release();
     pending.prepared = undefined;
     this.pending.delete(id);
+  }
+
+  publishObservation(observation: TurnObservation): void {
+    const child = this.child;
+    if (!child || !Number.isInteger(child.pid)) return;
+    void publishLauncherTurnObservation(
+      this.config.browserHostDescriptorPath!,
+      child.pid!,
+      observation,
+    ).catch(() => {});
   }
 
   private finishWithError(id: string, error: Error): void {

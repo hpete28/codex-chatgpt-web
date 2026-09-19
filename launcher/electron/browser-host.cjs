@@ -10,6 +10,7 @@ const {
 const { validateConnectorName } = require("./connector-identity.cjs");
 const { processRunning } = require("./process-tree.cjs");
 const { validatePasskeyLoginState } = require("./passkey-login-state.cjs");
+const { createTurnObservationStore } = require("./turn-observations.cjs");
 const {
   refreshTurnLeasesAfterSuspension,
   shouldBlockSleepForTurns,
@@ -390,6 +391,8 @@ class BrowserHost {
     this.visible = false;
     this.surfaceActive = true;
     this.turnTabs = new Map();
+    this.turnObservationStore = createTurnObservationStore();
+    this.releasedObservationOwners = new Map();
     this.closedTurnOwners = new Map();
     this.userCancelledTurnOwners = new Map();
     this.manualTerminalSignals = new Map();
@@ -1356,6 +1359,37 @@ class BrowserHost {
       this.syncViewVisibility();
     }
     return this.snapshot();
+  }
+
+  observeTurn(traceId, helperPid, observation) {
+    const tab = [...this.turnTabs.values()].find(candidate => candidate.traceId === traceId);
+    if (tab) {
+      if (tab.helperPid !== helperPid) {
+        throw new Error(`Browser helper ownership mismatch: expected ${tab.helperPid}, received ${helperPid}`);
+      }
+    } else {
+      // A terminal observation can race the non-retained tab release because telemetry is
+      // deliberately best-effort. Accept only an exact previously-owned trace that already has
+      // an observation; every other retired/unknown trace is ignored.
+      const closedOwner = this.closedTurnOwners.get(traceId);
+      const previous = this.turnObservationStore.get(traceId);
+      const terminal = observation?.phase === "finished"
+        || observation?.phase === "cancelled"
+        || observation?.phase === "failed";
+      const releasedOwner = this.releasedObservationOwners?.get(traceId);
+      if ((closedOwner !== helperPid && releasedOwner !== helperPid) || !previous || !terminal) return false;
+    }
+    if (!observation || observation.traceId !== traceId) return false;
+    const accepted = this.turnObservationStore.record(observation);
+    if (accepted && ["finished", "cancelled", "failed"].includes(observation.phase)) {
+      this.releasedObservationOwners?.delete(traceId);
+    }
+    if (accepted) this.publishState?.(this.snapshot());
+    return accepted;
+  }
+
+  turnObservations() {
+    return this.turnObservationStore.list();
   }
 
   refreshTurnLeases(reason, now = Date.now()) {
@@ -2423,6 +2457,15 @@ class BrowserHost {
     }
     // A browser tab represents an active Codex turn, not durable task history. The result already
     // lives in Codex, so release the terminal browser document without touching concurrent turns.
+    // The coordinator publishes terminal telemetry after this lifecycle acknowledgement.
+    // Keep its exact owner independently of cancellation/replay ownership, bounded to 20 turns.
+    if (this.turnObservationStore?.get(traceId)) {
+      this.releasedObservationOwners ??= new Map();
+      this.releasedObservationOwners.set(traceId, helperPid);
+      while (this.releasedObservationOwners.size > 20) {
+        this.releasedObservationOwners.delete(this.releasedObservationOwners.keys().next().value);
+      }
+    }
     this.removeTurnTab(tab, false);
     if (hideAfterTurn && !this.activeTraceId) this.hide();
     this.logger.info("browser.tab_released", { tabId: tab.id, traceId, status: tab.status });

@@ -13,6 +13,7 @@ import { createPortal } from "react-dom";
 import { copyFor, localizeRuntimeMessage, type Copy } from "./i18n";
 import { Icon, type IconName } from "./icons";
 import type {
+  BuildInfo,
   BrowserInteractionMode,
   BrowserState,
   DoctorReport,
@@ -22,6 +23,7 @@ import type {
   LogRecord,
   OperationState,
   Surface,
+  TurnObservation,
 } from "./types";
 
 const api = window.codexWebLauncher;
@@ -38,6 +40,7 @@ export function App() {
   const [browser, setBrowser] = useState<BrowserState | null>(null);
   const [operation, setOperation] = useState<OperationState | null>(null);
   const [logs, setLogs] = useState<LogRecord[]>([]);
+  const [turnObservations, setTurnObservations] = useState<TurnObservation[]>([]);
   const [error, setError] = useState<string | null>(null);
   const documentLanguage = snapshot?.state.language ?? "en";
 
@@ -54,6 +57,7 @@ export function App() {
       setBrowser(next.browser);
       setLogs(next.logs);
       setOperation(next.operation);
+      setTurnObservations(next.turnObservations);
       if (next.operation?.status === "failed" && next.operation.name !== "mcp-verification") {
         setError(next.operation.message);
       }
@@ -69,6 +73,7 @@ export function App() {
         : current);
     });
     const unsubscribeBrowser = api.onBrowserState(setBrowser);
+    const unsubscribeTurnObservations = api.onTurnObservations(setTurnObservations);
     const unsubscribeOperation = api.onOperation((next) => {
       setOperation(next);
       if (next.status === "failed" && next.name !== "mcp-verification") setError(next.message);
@@ -81,6 +86,7 @@ export function App() {
       cancelled = true;
       unsubscribeState();
       unsubscribeBrowser();
+      unsubscribeTurnObservations();
       unsubscribeOperation();
       unsubscribeLog();
       unsubscribeUpdate();
@@ -131,6 +137,7 @@ export function App() {
             operation={operation}
             setError={setError}
             snapshot={snapshot}
+            turnObservations={turnObservations}
             updateState={updateState}
           />
         )}
@@ -320,6 +327,7 @@ function LauncherShell({
   operation,
   setError,
   snapshot,
+  turnObservations,
   updateState,
 }: {
   browser: BrowserState | null;
@@ -329,6 +337,7 @@ function LauncherShell({
   operation: OperationState | null;
   setError: (error: string | null) => void;
   snapshot: LauncherSnapshot;
+  turnObservations: TurnObservation[];
   updateState: (state: LauncherState) => void;
 }) {
   const interactionSetupComplete = snapshot.state.coreSetupComplete === true
@@ -683,7 +692,13 @@ function LauncherShell({
               />
             ) : null}
             {surface === "activity" ? (
-              <ActivitySurface copy={copy} language={language} logs={logs} setError={setError} />
+              <ActivitySurface
+                copy={copy}
+                language={language}
+                logs={logs}
+                setError={setError}
+                turnObservations={turnObservations}
+              />
             ) : null}
             {surface === "settings" ? (
               <SettingsSurface
@@ -1526,22 +1541,114 @@ function ActivitySurface({
   language,
   logs,
   setError,
+  turnObservations,
 }: {
   copy: Copy;
   language: Language;
   logs: LogRecord[];
   setError: (error: string | null) => void;
+  turnObservations: TurnObservation[];
 }) {
+  const latestTurnObservations = useMemo(() => {
+    const latestByTrace = new Map<string, TurnObservation>();
+    for (let index = turnObservations.length - 1; index >= 0; index -= 1) {
+      const observation = turnObservations[index];
+      if (!latestByTrace.has(observation.traceId)) latestByTrace.set(observation.traceId, observation);
+    }
+    return [...latestByTrace.values()];
+  }, [turnObservations]);
+  const newestTraceId = turnObservations.at(-1)?.traceId ?? "";
+  const [selectedTraceId, setSelectedTraceId] = useState(newestTraceId);
+
+  useEffect(() => {
+    setSelectedTraceId((current) => (
+      current && latestTurnObservations.some((observation) => observation.traceId === current)
+        ? current
+        : newestTraceId
+    ));
+  }, [latestTurnObservations, newestTraceId]);
+
+  const selectedObservation = latestTurnObservations.find(
+    (observation) => observation.traceId === selectedTraceId,
+  ) ?? null;
+  const transportOutcome = selectedObservation
+    && ["finished", "cancelled", "failed"].includes(selectedObservation.phase)
+    ? humanEvent(selectedObservation.phase)
+    : copy.unavailable;
+
   return (
     <ContentSurface subtitle={copy.activitySubtitle} title={copy.activityTitle}>
+      <div className="turn-observation-panel">
+        <div className="turn-observation-selector">
+          <label htmlFor="turn-observation-select">{copy.observedTurn}</label>
+          <select
+            id="turn-observation-select"
+            disabled={latestTurnObservations.length === 0}
+            onChange={(event) => setSelectedTraceId(event.target.value)}
+            value={selectedTraceId}
+          >
+            {latestTurnObservations.length === 0 ? (
+              <option value="">{copy.noTurnObservations}</option>
+            ) : latestTurnObservations.map((observation) => (
+              <option key={observation.traceId} value={observation.traceId}>
+                {observation.traceId}
+              </option>
+            ))}
+          </select>
+        </div>
+        {selectedObservation ? (
+          <div className="turn-observation-summary">
+            <div>
+              <span>{copy.observedPhase}</span>
+              <strong>{humanEvent(selectedObservation.phase)}</strong>
+            </div>
+            <div>
+              <span>{copy.lastObservedProgress}</span>
+              <strong>{formatTime(selectedObservation.at, language)}</strong>
+            </div>
+            <div>
+              <span>{copy.multipartAcknowledgement}</span>
+              <strong>
+                {selectedObservation.acknowledgedParts !== undefined
+                  && selectedObservation.totalParts !== undefined
+                  ? `${selectedObservation.acknowledgedParts}/${selectedObservation.totalParts}`
+                  : copy.unavailable}
+              </strong>
+            </div>
+            <div>
+              <span>{copy.continuationCount}</span>
+              <strong>{selectedObservation.continuationCount ?? copy.unavailable}</strong>
+            </div>
+            <div>
+              <span>{copy.transportOutcome}</span>
+              <strong>{transportOutcome}</strong>
+            </div>
+            <div>
+              <span>{copy.modelReportedWorkState}</span>
+              <strong>{selectedObservation.workState ? humanEvent(selectedObservation.workState) : copy.unavailable}</strong>
+            </div>
+          </div>
+        ) : (
+          <div className="turn-observation-empty">{copy.noTurnObservations}</div>
+        )}
+      </div>
       <div className="section-heading activity-heading">
         <span>{copy.recentActivity}</span>
+        <div className="activity-actions">
+          <SecondaryButton
+            icon="external"
+            onClick={() => void api?.exportDiagnosticReport(selectedObservation?.traceId ?? null)
+              .catch((cause) => setError(messageOf(cause)))}
+          >
+            {copy.exportDiagnosticReport}
+          </SecondaryButton>
         <SecondaryButton
           icon="external"
           onClick={() => void api!.exportLogs().catch((cause) => setError(messageOf(cause)))}
         >
           {copy.exportSafeLog}
         </SecondaryButton>
+        </div>
       </div>
       <div className="activity-table">
         {logs.length === 0 ? (
@@ -1586,6 +1693,12 @@ function SettingsSurface({
   const [busy, setBusy] = useState(false);
   const [turnsCancelled, setTurnsCancelled] = useState(false);
   const [integrationRemoved, setIntegrationRemoved] = useState(false);
+  const buildMismatch = snapshot.launcherBuild !== null
+    && snapshot.runtimeBuild !== null
+    && buildIdentitiesDiffer(snapshot.launcherBuild, snapshot.runtimeBuild);
+  const updaterDisabledReason = snapshot.update.status === "disabled" && "reason" in snapshot.update
+    ? snapshot.update.reason
+    : null;
 
   const updateLanguage = async (next: Language) => {
     try {
@@ -1735,6 +1848,32 @@ function SettingsSurface({
         </NoticeRow>
       ) : null}
 
+      <SectionHeading label={copy.buildIdentity} spaced />
+      <div className="build-identity-grid">
+        <BuildIdentityCard build={snapshot.launcherBuild} copy={copy} title={copy.launcherBuild} />
+        <BuildIdentityCard
+          build={snapshot.runtimeBuild}
+          bundleId={snapshot.runtimeBundleId}
+          copy={copy}
+          title={copy.runtimeBuild}
+        />
+      </div>
+      {buildMismatch ? (
+        <NoticeRow icon="alert" tone="warning">
+          {copy.buildMismatch}
+        </NoticeRow>
+      ) : null}
+      {updaterDisabledReason === "custom-build" ? (
+        <NoticeRow icon="alert" tone="warning">
+          {copy.customUpdaterDisabled}
+        </NoticeRow>
+      ) : null}
+      {updaterDisabledReason === "unknown-build" ? (
+        <NoticeRow icon="alert" tone="warning">
+          {copy.unknownUpdaterDisabled}
+        </NoticeRow>
+      ) : null}
+
       <SectionHeading label={copy.diagnostics} spaced />
       <button className="diagnostic-row" disabled={busy} onClick={() => void runDoctor()} type="button">
         <Icon name="activity" />
@@ -1774,6 +1913,61 @@ function SettingsSurface({
       </div>
     </ContentSurface>
   );
+}
+
+function BuildIdentityCard({
+  build,
+  bundleId,
+  copy,
+  title,
+}: {
+  build: BuildInfo | null;
+  bundleId?: string | null;
+  copy: Copy;
+  title: string;
+}) {
+  const revision = build?.sourceRevision ? build.sourceRevision.slice(0, 12) : copy.unknownBuild;
+  const sourceCondition = build?.dirty === false
+    ? copy.cleanBuild
+    : build?.dirty === true
+      ? copy.dirtyBuild
+      : copy.unknownBuild;
+
+  return (
+    <section className="build-identity-card">
+      <h3>{title}</h3>
+      <dl>
+        <div>
+          <dt>{copy.distribution}</dt>
+          <dd>{build?.distribution ?? copy.unknownBuild}</dd>
+        </div>
+        <div>
+          <dt>{copy.sourceRevision}</dt>
+          <dd className="build-identity-value">{revision}</dd>
+        </div>
+        <div>
+          <dt>{copy.sourceCondition}</dt>
+          <dd>{sourceCondition}</dd>
+        </div>
+        {bundleId !== undefined ? (
+          <div>
+            <dt>{copy.runtimeBundleId}</dt>
+            <dd className="build-identity-value">
+              {bundleId ? bundleId.slice(0, 12) : copy.unknownBuild}
+            </dd>
+          </div>
+        ) : null}
+      </dl>
+    </section>
+  );
+}
+
+function buildIdentitiesDiffer(launcher: BuildInfo, runtime: BuildInfo): boolean {
+  return launcher.schemaVersion !== runtime.schemaVersion
+    || launcher.distribution !== runtime.distribution
+    || launcher.repository !== runtime.repository
+    || launcher.sourceRevision !== runtime.sourceRevision
+    || launcher.dirty !== runtime.dirty;
 }
 
 function ContentSurface({

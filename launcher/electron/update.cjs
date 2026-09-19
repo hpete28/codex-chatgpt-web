@@ -5,6 +5,7 @@ const os = require("node:os");
 const path = require("node:path");
 const { spawn, spawnSync } = require("node:child_process");
 const { pipeline } = require("node:stream/promises");
+const { validateBuildInfo } = require("./build-info.cjs");
 
 const REPOSITORY = "miuuyy/codex-chatgpt-web";
 const RELEASE_API_URL = `https://api.github.com/repos/${REPOSITORY}/releases/latest`;
@@ -249,6 +250,7 @@ function createUpdateController({
   platform,
   arch,
   packaged,
+  buildInfo,
   executablePath,
   runtimeExecutable,
   logsDirectory,
@@ -258,7 +260,12 @@ function createUpdateController({
 }) {
   const deps = { ...defaultDependencies(), ...dependencies };
   const supportedAsset = releaseAssetName(currentVersion, platform, arch);
-  let state = packaged && supportedAsset ? { status: "idle" } : { status: "disabled" };
+  const validatedBuildInfo = validateBuildInfo(buildInfo);
+  let state = !packaged || !supportedAsset
+    ? { status: "disabled" }
+    : validatedBuildInfo
+      ? { status: "disabled", reason: "custom-build" }
+      : { status: "disabled", reason: "unknown-build" };
   let checked = false;
   let pending = null;
   let candidate = null;
@@ -304,6 +311,14 @@ function createUpdateController({
   }
 
   async function beginInstall() {
+    if (state.status === "disabled") {
+      const reason = state.reason === "custom-build"
+        ? "Public launcher updates are disabled for this custom build"
+        : state.reason === "unknown-build"
+          ? "Public launcher updates are disabled because build identity is unknown"
+          : "Launcher updates are unavailable";
+      throw new Error(reason);
+    }
     if (pending) throw new Error("An update is already being prepared");
     if (state.status !== "available" || !candidate) throw new Error("No launcher update is available");
     const available = candidate;

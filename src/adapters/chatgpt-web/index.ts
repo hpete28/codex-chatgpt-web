@@ -9,6 +9,7 @@ import {
   LauncherManualTurnFailedError,
   LauncherManualTurnTimedOutError,
   markLauncherManualTurnStarted,
+  publishLauncherTurnObservation,
   releaseLauncherRetainedConversation,
   startLauncherManualTurn,
   waitForLauncherManualSent,
@@ -553,6 +554,49 @@ export function createChatGptWebAdapter(
     });
     const trace = new ChatGptTraceFeed();
     const text = new ChatGptTextFeed();
+    let observationSequence = 0;
+    let continuationCount = 0;
+    let lastObservationPhase: string | undefined;
+    const observeTurn = (
+      phase: "preparing" | "staging" | "responding" | "tools" | "recovering" | "continuing" | "compacting" | "finished" | "cancelled" | "failed",
+      detail: {
+        acknowledgedParts?: number;
+        totalParts?: number;
+        continuationCount?: number;
+        workState?: "continue" | "complete" | "blocked";
+      } = {},
+      force = false,
+    ): void => {
+      if (!force && lastObservationPhase === phase) return;
+      lastObservationPhase = phase;
+      observationSequence += 1;
+      const observation = {
+        traceId,
+        sequence: observationSequence,
+        at: new Date().toISOString(),
+        phase,
+        ...detail,
+      };
+      if (manualRequest) {
+        if (retainedLauncherDescriptor) {
+          void publishLauncherTurnObservation(retainedLauncherDescriptor, process.pid, observation).catch(() => {});
+        }
+      } else {
+        worker.publishTurnObservation(observation);
+      }
+    };
+    const observeTerminal = (browser: Promise<string>): Promise<string> => browser.then(
+      answer => {
+        observeTurn("finished", {}, true);
+        return answer;
+      },
+      error => {
+        const cancelled = (error instanceof DOMException && error.name === "AbortError")
+          || (error instanceof ChatGptWebAdapterError && error.code === "client_cancelled");
+        observeTurn(cancelled ? "cancelled" : "failed", {}, true);
+        throw error;
+      },
+    );
     const observedCapabilityTokens = new Set<string>();
     const observeCapabilityRetirement = (
       turnToken: string,
@@ -587,9 +631,14 @@ export function createChatGptWebAdapter(
         hooks.onCompactionProgress?.();
       },
     };
-    const multipartProgressLifecycle = hooks.onCompactionProgress
-      ? { onMultipartStageAcknowledged: hooks.onCompactionProgress }
-      : {};
+    const multipartProgressLifecycle = {
+      onMultipartStageAcknowledged: (stageIndex: number, totalParts?: number) => {
+        if (totalParts !== undefined) {
+          observeTurn("staging", { acknowledgedParts: stageIndex, totalParts }, true);
+        }
+        hooks.onCompactionProgress?.();
+      },
+    };
     if (manualRequest) {
       if (!environment) throw new Error("ChatGPT Zero Risk requires a trusted Codex environment");
       if (!retainedLauncherDescriptor) throw new Error("ChatGPT Zero Risk requires the Launcher browser host");
@@ -655,6 +704,7 @@ export function createChatGptWebAdapter(
             ...(parsed._compactionRequest ? { compaction: true as const } : {}),
           });
           launcherStarted = true;
+          observeTurn(parsed._compactionRequest ? "compacting" : "preparing");
           await zeroRiskManualControl.waitSent(retainedLauncherDescriptor, owner, {
             abortSignal: browserAbort.signal,
           });
@@ -696,6 +746,7 @@ export function createChatGptWebAdapter(
           }
           text.push(answer);
           try {
+            observeTurn("finished", {}, true);
             await finishLauncher("completed");
           } catch (controlError) {
             // The broker result is already authoritative. A launcher acknowledgement failure may
@@ -712,6 +763,7 @@ export function createChatGptWebAdapter(
           // retirement observer also aborts browserAbort, but that self-induced abort must not turn
           // an ordinary launcher/runtime failure into a user cancellation.
           const externallyAborted = browserAbort.signal.aborted;
+          observeTurn(externallyAborted ? "cancelled" : "failed", {}, true);
           if (activeToken) await Promise.resolve(broker.revoke(activeToken, normalized)).catch(() => {});
           try {
             await finishLauncher(externallyAborted ? "aborted" : "failed");
@@ -756,7 +808,7 @@ export function createChatGptWebAdapter(
       };
     }
     if (!mode.localTools) {
-      const browserTurn = cancellableBrowserTurn(finalizeCheckpoint(worker.run({
+      const browserTurn = cancellableBrowserTurn(finalizeCheckpoint(observeTerminal(worker.run({
         traceId,
         modelId: parsed.modelId,
         reasoning: parsed.options.reasoning,
@@ -772,16 +824,26 @@ export function createChatGptWebAdapter(
         }),
         abortSignal: browserAbort.signal,
         ...(parsed._compactionRequest ? { compaction: true } : {}),
+        onPreparedSelected: () => observeTurn(parsed._compactionRequest ? "compacting" : "preparing"),
         ...submissionLifecycle,
         ...multipartProgressLifecycle,
-        onReasoningSummary: (text, continuation) => trace.push({ kind: "reasoning", text, ...(continuation ? { continuation: true } : {}) }),
-        onCommentary: (text, continuation) => trace.push({ kind: "commentary", text, ...(continuation ? { continuation: true } : {}) }),
-        onTextDelta: delta => text.push(delta),
+        onReasoningSummary: (text, continuation) => {
+          observeTurn("responding");
+          trace.push({ kind: "reasoning", text, ...(continuation ? { continuation: true } : {}) });
+        },
+        onCommentary: (text, continuation) => {
+          observeTurn("responding");
+          trace.push({ kind: "commentary", text, ...(continuation ? { continuation: true } : {}) });
+        },
+        onTextDelta: delta => {
+          observeTurn("responding");
+          text.push(delta);
+        },
         ...(captureLunaCheckpoint ? {
           captureLunaCheckpoint: true,
           onLunaCheckpoint: captureCheckpoint,
         } : {}),
-      })), browserAbort);
+      }))), browserAbort);
       return {
         mode: "read-only",
         browser: browserTurn.browser,
@@ -807,6 +869,18 @@ export function createChatGptWebAdapter(
     );
     const token = deferred<string>();
     const externalProgress = new ChatGptExternalTurnProgress();
+    const toolObservationAbort = new AbortController();
+    void (async () => {
+      let revision = 0;
+      while (!toolObservationAbort.signal.aborted) {
+        const progress = await externalProgress.waitForChange(revision, toolObservationAbort.signal);
+        revision = progress.revision;
+        if (!toolObservationAbort.signal.aborted) observeTurn("tools", {}, true);
+      }
+    })().catch(error => {
+      if (toolObservationAbort.signal.aborted || (error instanceof DOMException && error.name === "AbortError")) return;
+      console.warn(`[chatgpt-web] turn observation tool mirror stopped: ${error instanceof Error ? error.message : String(error)}`);
+    });
     let tokenSettled = false;
     let activeToken: string | undefined;
     const publishCapability = (turnToken: string): void => {
@@ -899,6 +973,7 @@ export function createChatGptWebAdapter(
     let stalledResponseStopped = false;
     const markStalledResponseStopped = (): void => {
       stalledResponseStopped = true;
+      observeTurn("recovering", {}, true);
     };
     const initialBrowserTurn: BrowserTurn = {
       traceId,
@@ -913,12 +988,22 @@ export function createChatGptWebAdapter(
       ...(retainConversation ? { retainConversation: true, conversationKey } : {}),
       abortSignal: browserAbort.signal,
       ...(parsed._compactionRequest ? { compaction: true } : {}),
+      onPreparedSelected: () => observeTurn(parsed._compactionRequest ? "compacting" : "preparing"),
       ...submissionLifecycle,
       ...multipartProgressLifecycle,
       ...(workContinuation ? { onStalledResponseStopped: markStalledResponseStopped } : {}),
-      onReasoningSummary: (text, continuation) => trace.push({ kind: "reasoning", text, ...(continuation ? { continuation: true } : {}) }),
-      onCommentary: (text, continuation) => trace.push({ kind: "commentary", text, ...(continuation ? { continuation: true } : {}) }),
-      onTextDelta: delta => text.push(delta),
+      onReasoningSummary: (text, continuation) => {
+        observeTurn("responding");
+        trace.push({ kind: "reasoning", text, ...(continuation ? { continuation: true } : {}) });
+      },
+      onCommentary: (text, continuation) => {
+        observeTurn("responding");
+        trace.push({ kind: "commentary", text, ...(continuation ? { continuation: true } : {}) });
+      },
+      onTextDelta: delta => {
+        observeTurn("responding");
+        text.push(delta);
+      },
       externalProgress,
       completionFence: {
         begin: async () => broker.beginCompletionFence(await token.promise),
@@ -1003,6 +1088,11 @@ export function createChatGptWebAdapter(
         // worker.run includes physical browser settlement and the launcher's exact retain acknowledgement.
         // Never fall back to a fresh chat or recompile/replay the accepted native request.
         browserCapabilityToken = continuation.turnToken;
+        continuationCount += 1;
+        observeTurn("continuing", {
+          continuationCount,
+          workState: continuation.state.status,
+        }, true);
         nextTurn = retainedTurn(
           async () => {
             if (browserAbort.signal.aborted) throw browserAbort.signal.reason ?? new DOMException("ChatGPT web turn aborted", "AbortError");
@@ -1012,7 +1102,8 @@ export function createChatGptWebAdapter(
         );
       }
     };
-    const browserTurn = cancellableBrowserTurn(trackBrowserOwner(finalizeCheckpoint(runBrowserMessages())), browserAbort);
+    const browserTurn = cancellableBrowserTurn(trackBrowserOwner(finalizeCheckpoint(observeTerminal(runBrowserMessages()))), browserAbort);
+    void browserTurn.physicalSettlement.finally(() => toolObservationAbort.abort()).catch(() => {});
     void browserTurn.browser.catch(error => {
       if (!tokenSettled) {
         tokenSettled = true;

@@ -12,7 +12,12 @@ semantic task completion. The adapter previously turned that outcome directly in
 [PR #195](https://github.com/miuuyy/codex-chatgpt-web/pull/195) are prior art, not merged requirements.
 The initial proposal combined a duration-based audit with stopped-thinking recovery. The revised
 PR retained only one stopped-thinking recovery; both were closed without a substantiated live
-reproduction. This change does not recover stopped-thinking, infer a deadline, or replay a prompt.
+reproduction. That history describes the original clean-boundary continuation scope. Current code
+also has a separate observed-stall recovery path: when an active response stops making observable
+progress under its bounded evidence checks, the bridge can stop only that wedged generation and use
+`stalledResponseContinuationPrompt` to continue the same retained task. That recovery is distinct
+from ordinary work-state continuation and does not treat every quiet interval or DOM delay as a
+continuation trigger.
 
 ## Contract
 

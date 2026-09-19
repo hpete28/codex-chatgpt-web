@@ -72,6 +72,7 @@ import {
   LAUNCHER_TURN_HEARTBEAT_INTERVAL_MS,
   LAUNCHER_TURN_HEARTBEAT_TIMEOUT_MS,
   notifyLauncherTurn,
+  type TurnObservation,
 } from "../../launcher-browser-host";
 import {
   CHATGPT_WEB_BIGGER_CONTEXT_MULTIPLIER,
@@ -1322,7 +1323,7 @@ export interface BrowserTurn {
   /** The bridge deliberately stopped a wedged generation so the retained conversation can resume it. */
   onStalledResponseStopped?: () => void;
   /** One inert Bigger Context stage completed its exact acknowledgement boundary. */
-  onMultipartStageAcknowledged?: (stageIndex: number) => void | Promise<void>;
+  onMultipartStageAcknowledged?: (stageIndex: number, totalParts?: number) => void | Promise<void>;
   /** Visible ChatGPT reasoning-summary step titles only; never hidden chain-of-thought. */
   onReasoningSummary?: (text: string, continuation?: boolean) => void;
   /** Stable visible ChatGPT prose between status/tool rows. */
@@ -2361,6 +2362,11 @@ export class ChatGptBrowserWorker {
       if (this.activeRuns.get(turn.traceId) === run) this.activeRuns.delete(turn.traceId);
     }).catch(() => {});
     return run;
+  }
+
+  publishTurnObservation(observation: TurnObservation): void {
+    if (this.config.browserHost !== "launcher" || process.env.CODEX_CHATGPT_WEB_BROWSER_HELPER_PROCESS === "1") return;
+    this.launcherHelper?.publishObservation(observation);
   }
 
   verifyConnector(traceId = `verify_${randomUUID().replaceAll("-", "")}`): Promise<string> {
@@ -5009,7 +5015,7 @@ export class ChatGptBrowserWorker {
           const stageRejection = await submissionRejection.failure();
           if (stageRejection) throw stageRejection;
           await diagnostics.capture(page, `multipart-stage-${index + 1}-acknowledged`);
-          await turn.onMultipartStageAcknowledged?.(index + 1);
+          await turn.onMultipartStageAcknowledged?.(index + 1, prepared.multipart.parts.length);
         }
         if (mode.effort !== requestedMode.effort) {
           mode = await this.runStage(

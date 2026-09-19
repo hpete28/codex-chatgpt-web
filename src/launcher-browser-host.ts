@@ -415,10 +415,34 @@ export type LauncherTurnActivity =
       connectorBound?: boolean;
     };
 
+export type TurnObservationPhase =
+  | "preparing"
+  | "staging"
+  | "responding"
+  | "tools"
+  | "recovering"
+  | "continuing"
+  | "compacting"
+  | "finished"
+  | "cancelled"
+  | "failed";
+
+export interface TurnObservation {
+  traceId: string;
+  sequence: number;
+  at: string;
+  phase: TurnObservationPhase;
+  acknowledgedParts?: number;
+  totalParts?: number;
+  continuationCount?: number;
+  workState?: "continue" | "complete" | "blocked";
+}
+
 export const LAUNCHER_TURN_START_TIMEOUT_MS = 5_000;
 export const LAUNCHER_TURN_HEARTBEAT_INTERVAL_MS = 10_000;
 export const LAUNCHER_TURN_HEARTBEAT_TIMEOUT_MS = 5_000;
 export const LAUNCHER_TURN_END_TIMEOUT_MS = 15_000;
+export const LAUNCHER_TURN_OBSERVATION_TIMEOUT_MS = 1_500;
 
 export interface LauncherManualTurnOwner {
   traceId: string;
@@ -726,6 +750,43 @@ export async function notifyLauncherTurn(
       return { cancelledByUser: body.cancelledByUser };
     }
     return {};
+  }
+}
+
+/**
+ * Publish observational turn telemetry without coupling launcher delivery to execution.
+ * Callers must intentionally ignore failures; this channel cannot decide or extend a turn.
+ */
+export async function publishLauncherTurnObservation(
+  descriptorPath: string,
+  helperPid: number,
+  observation: TurnObservation,
+  timeoutMs = LAUNCHER_TURN_OBSERVATION_TIMEOUT_MS,
+): Promise<boolean> {
+  const descriptor = readLauncherBrowserHostDescriptor(descriptorPath);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(`${descriptor.control.endpoint}/v1/turn/observe`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${descriptor.control.token}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        traceId: observation.traceId,
+        helperPid,
+        observation,
+      }),
+      signal: controller.signal,
+    });
+    if (!response.ok) return false;
+    const body = await response.json().catch(() => ({})) as Record<string, unknown>;
+    return body.ok === true && typeof body.accepted === "boolean" ? body.accepted : false;
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(timer);
   }
 }
 

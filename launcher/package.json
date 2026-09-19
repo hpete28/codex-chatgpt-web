@@ -7,16 +7,17 @@
   "type": "module",
   "main": "electron/main.cjs",
   "scripts": {
-    "dev": "bun run scripts/dev.cjs",
+    "build:identity": "node scripts/generate-build-info.cjs",
+    "dev": "node scripts/generate-build-info.cjs && bun run scripts/dev.cjs",
     "audit": "bun audit",
     "typecheck": "tsc --noEmit",
     "build:renderer": "vite build",
-    "build": "bun run typecheck && bun run build:renderer",
+    "build": "bun run build:identity && bun run typecheck && bun run build:renderer",
     "build:runtime": "bun run scripts/prepare-runtime.cjs",
-    "package": "bun run build && bun run build:runtime && bun run scripts/package.cjs",
-    "package:mac": "bun run build && bun run build:runtime && bun run scripts/package.cjs --mac",
-    "package:win": "bun run build && bun run build:runtime && bun run scripts/package.cjs --win",
-    "package:linux": "bun run build && bun run build:runtime && bun run scripts/package.cjs --linux",
+    "package": "bun run build && bun run build:runtime && node scripts/generate-build-info.cjs --release && bun run scripts/package.cjs",
+    "package:mac": "bun run build && bun run build:runtime && node scripts/generate-build-info.cjs --release && bun run scripts/package.cjs --mac",
+    "package:win": "bun run build && bun run build:runtime && node scripts/generate-build-info.cjs --release && bun run scripts/package.cjs --win",
+    "package:linux": "bun run build && bun run build:runtime && node scripts/generate-build-info.cjs --release && bun run scripts/package.cjs --linux",
     "smoke:package": "bun run scripts/smoke-package.cjs",
     "test": "node --test tests/*.test.cjs",
     "start": "electron ."
@@ -59,6 +60,10 @@
       "package.json"
     ],
     "extraResources": [
+      {
+        "from": "build/build-info.json",
+        "to": "build-info.json"
+      },
       {
         "from": "build/runtime",
         "to": "runtime"

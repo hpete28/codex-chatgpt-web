@@ -1755,8 +1755,79 @@ code {
 
 /* Activity */
 
+.turn-observation-panel {
+  margin-bottom: 18px;
+  padding: 12px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-background-control);
+}
+
+.turn-observation-selector {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+}
+
+.turn-observation-selector label,
+.turn-observation-summary span {
+  color: var(--color-text-tertiary);
+  font-size: var(--text-xs);
+}
+
+.turn-observation-selector select {
+  min-width: 0;
+  min-height: 30px;
+  padding: 4px 8px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-xs);
+  background: var(--color-background-control-hover);
+  color: var(--color-text-primary);
+  font: inherit;
+}
+
+.turn-observation-summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px 16px;
+  margin-top: 12px;
+}
+
+.turn-observation-summary > div {
+  min-width: 0;
+}
+
+.turn-observation-summary span,
+.turn-observation-summary strong {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.turn-observation-summary strong {
+  margin-top: 3px;
+  color: var(--color-text-secondary);
+  font-size: var(--text-sm);
+  font-weight: 500;
+}
+
+.turn-observation-empty {
+  margin-top: 10px;
+  color: var(--color-text-tertiary);
+  font-size: var(--text-sm);
+}
+
 .activity-heading {
   margin-bottom: 2px;
+}
+
+.activity-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
 }
 
 .activity-heading .button-secondary {
@@ -1913,6 +1984,60 @@ code {
 
 .setting-row > div {
   padding: 12px 0;
+}
+
+.build-identity-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.build-identity-card {
+  min-width: 0;
+  padding: 13px 14px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-background-control);
+}
+
+.build-identity-card h3 {
+  margin: 0 0 10px;
+  color: var(--color-text-primary);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.build-identity-card dl,
+.build-identity-card dd {
+  margin: 0;
+}
+
+.build-identity-card dl {
+  display: grid;
+  gap: 7px;
+}
+
+.build-identity-card dl > div {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  color: var(--color-text-tertiary);
+  font-size: var(--text-xs);
+}
+
+.build-identity-card dd {
+  max-width: 150px;
+  overflow: hidden;
+  color: var(--color-text-secondary);
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.build-identity-value {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
 }
 
 .language-menu {

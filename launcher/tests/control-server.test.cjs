@@ -47,6 +47,10 @@ test("browser control server authenticates and owns turn visibility", async () =
       };
     },
     heartbeatTurn: (...args) => calls.push(["heartbeat", ...args]),
+    observeTurn: (...args) => {
+      calls.push(["observe", ...args]);
+      return true;
+    },
     endTurn: (...args) => {
       calls.push(["end", ...args]);
       return { cancelledByUser: false };
@@ -102,6 +106,24 @@ test("browser control server authenticates and owns turn visibility", async () =
     });
     assert.equal(heartbeat.status, 200);
 
+    const observation = {
+      traceId: "abcdef123456",
+      sequence: 1,
+      at: "2026-09-18T15:30:00.000-04:00",
+      phase: "responding",
+    };
+    const observed = await fetch(`${descriptor.endpoint}/v1/turn/observe`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${descriptor.token}`, "content-type": "application/json" },
+      body: JSON.stringify({
+        traceId: "abcdef123456",
+        helperPid: process.pid,
+        observation,
+      }),
+    });
+    assert.equal(observed.status, 200);
+    assert.deepEqual(await observed.json(), { ok: true, accepted: true });
+
     const invalidRefresh = await fetch(`${descriptor.endpoint}/v1/turn/heartbeat`, {
       method: "POST",
       headers: { authorization: `Bearer ${descriptor.token}`, "content-type": "application/json" },
@@ -145,6 +167,7 @@ test("browser control server authenticates and owns turn visibility", async () =
         true,
       ],
       ["heartbeat", "abcdef123456", process.pid, true],
+      ["observe", "abcdef123456", process.pid, observation],
       ["end", "abcdef123456", process.pid, "completed", true, undefined, true, true],
     ]);
     assert.equal(logs.some(([, event]) => event === "browser.turn_started"), true);

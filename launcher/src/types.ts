@@ -83,6 +83,59 @@ export interface DoctorReport {
   checks: DoctorCheck[];
 }
 
+export interface BuildInfo {
+  schemaVersion: 1;
+  distribution: "custom";
+  repository: "hpete28/codex-chatgpt-web";
+  sourceRevision: string | null;
+  dirty: boolean | null;
+}
+
+export interface TurnObservation {
+  traceId: string;
+  sequence: number;
+  at: string;
+  phase: "preparing" | "staging" | "responding" | "tools" | "recovering" | "continuing" | "compacting" | "finished" | "cancelled" | "failed";
+  acknowledgedParts?: number;
+  totalParts?: number;
+  continuationCount?: number;
+  workState?: "continue" | "complete" | "blocked";
+}
+
+export interface DiagnosticReport {
+  schemaVersion: 1;
+  generatedAt: string;
+  appVersion: string;
+  profile: LauncherProfile;
+  mode: "full" | "browser-only" | null;
+  interactionMode: BrowserInteractionMode | null;
+  launcherBuild: BuildInfo | null;
+  runtimeBuild: BuildInfo | null;
+  runtimeBundleId: string | null;
+  doctor: {
+    observedAt: string | null;
+    checks: Array<{ id: string; status: "ok" | "warning" | "error" }>;
+  };
+  turn: {
+    traceId: string;
+    phase: TurnObservation["phase"];
+    observedAt: string;
+    acknowledgedParts?: number;
+    totalParts?: number;
+    continuationCount?: number;
+    workState?: "continue" | "complete" | "blocked";
+  } | null;
+  unavailable: Array<
+    | "launcher-build"
+    | "runtime-build"
+    | "runtime-bundle"
+    | "doctor"
+    | "turn"
+    | "mode"
+    | "interaction-mode"
+  >;
+}
+
 export interface OperationState {
   name: string;
   status: "running" | "completed" | "failed";
@@ -90,7 +143,8 @@ export interface OperationState {
 }
 
 export type UpdateState =
-  | { status: "disabled" | "idle" | "checking" | "up-to-date" }
+  | { status: "disabled"; reason?: "custom-build" | "unknown-build" }
+  | { status: "idle" | "checking" | "up-to-date" }
   | { status: "available" | "downloading" | "installing"; version: string }
   | { status: "error"; message: string };
 
@@ -103,6 +157,7 @@ export interface LauncherSnapshot {
   };
   state: LauncherState;
   browser: BrowserState | null;
+  turnObservations: TurnObservation[];
   connectorName: string;
   connectorNames: Record<BrowserInteractionMode, string>;
   mcpCredentialsConfigured: boolean;
@@ -117,6 +172,9 @@ export interface LauncherSnapshot {
   platform: string;
   packaged: boolean;
   version: string;
+  launcherBuild: BuildInfo | null;
+  runtimeBuild: BuildInfo | null;
+  runtimeBundleId: string | null;
   smokePassed: boolean;
   operation: OperationState | null;
   update: UpdateState;
@@ -172,12 +230,14 @@ export interface LauncherApi {
   setSidebarState(state: { open: boolean; width: number }): Promise<LauncherState>;
   logs(limit?: number): Promise<LogRecord[]>;
   exportLogs(): Promise<string | null>;
+  exportDiagnosticReport(traceId?: string | null): Promise<string | null>;
   installUpdate(): Promise<boolean>;
   windowState(): Promise<{ fullScreen: boolean; maximized: boolean }>;
   windowControl(action: "close" | "minimize" | "zoom"): void;
   onWindowStateChanged(listener: (state: { fullScreen: boolean; maximized: boolean }) => void): () => void;
   onStateChanged(listener: (state: LauncherState) => void): () => void;
   onBrowserState(listener: (state: BrowserState) => void): () => void;
+  onTurnObservations(listener: (observations: TurnObservation[]) => void): () => void;
   onOperation(listener: (state: OperationState) => void): () => void;
   onLog(listener: (record: LogRecord) => void): () => void;
   onUpdateState(listener: (state: UpdateState) => void): () => void;

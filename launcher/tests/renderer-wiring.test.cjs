@@ -5,10 +5,55 @@ const path = require("node:path");
 
 const launcherRoot = path.resolve(__dirname, "..");
 const appSource = fs.readFileSync(path.join(launcherRoot, "src", "App.tsx"), "utf8");
+const i18nSource = fs.readFileSync(path.join(launcherRoot, "src", "i18n.ts"), "utf8");
 const stylesSource = fs.readFileSync(path.join(launcherRoot, "src", "styles.css"), "utf8");
 const electronMain = fs.readFileSync(path.join(launcherRoot, "electron", "main.cjs"), "utf8");
 const browserHostSource = fs.readFileSync(path.join(launcherRoot, "electron", "browser-host.cjs"), "utf8");
 const preloadSource = fs.readFileSync(path.join(launcherRoot, "electron", "preload.cjs"), "utf8");
+
+test("settings distinguish launcher and runtime build identities", () => {
+  assert.match(appSource, /<BuildIdentityCard build=\{snapshot\.launcherBuild\}[\s\S]*?title=\{copy\.launcherBuild\}/);
+  assert.match(appSource, /<BuildIdentityCard[\s\S]*?build=\{snapshot\.runtimeBuild\}[\s\S]*?bundleId=\{snapshot\.runtimeBundleId\}/);
+  assert.match(appSource, /build\.sourceRevision\.slice\(0, 12\)/);
+  assert.match(appSource, /bundleId\.slice\(0, 12\)/);
+  assert.match(appSource, /build\?\.dirty === false[\s\S]*?copy\.cleanBuild[\s\S]*?build\?\.dirty === true[\s\S]*?copy\.dirtyBuild[\s\S]*?copy\.unknownBuild/);
+  assert.match(appSource, /buildIdentitiesDiffer\(snapshot\.launcherBuild, snapshot\.runtimeBuild\)/);
+  assert.match(appSource, /launcher\.sourceRevision !== runtime\.sourceRevision/);
+  assert.match(appSource, /launcher\.dirty !== runtime\.dirty/);
+  assert.match(appSource, /buildMismatch[\s\S]*?copy\.buildMismatch/);
+  assert.match(stylesSource, /\.build-identity-grid\s*\{[^}]*grid-template-columns:\s*repeat\(2, minmax\(0, 1fr\)\);/s);
+});
+
+test("settings explain why the public updater is disabled for non-public builds", () => {
+  assert.match(appSource, /updaterDisabledReason === "custom-build"[\s\S]*?copy\.customUpdaterDisabled/);
+  assert.match(appSource, /updaterDisabledReason === "unknown-build"[\s\S]*?copy\.unknownUpdaterDisabled/);
+  assert.equal((i18nSource.match(/customUpdaterDisabled:/g) || []).length, 5);
+  assert.equal((i18nSource.match(/unknownUpdaterDisabled:/g) || []).length, 5);
+  assert.match(i18nSource, /customUpdaterDisabled: "Public updater is disabled for custom builds\. Updates use reviewed upstream integration and a separately authorized installation\."/);
+  assert.doesNotMatch(appSource, /hpete28\/codex-chatgpt-web\/releases/);
+});
+
+test("activity renders validated turn observations without deriving semantic progress from logs", () => {
+  assert.match(appSource, /const \[turnObservations, setTurnObservations\] = useState<TurnObservation\[\]>\(\[\]\)/);
+  assert.match(appSource, /setTurnObservations\(next\.turnObservations\)/);
+  assert.match(appSource, /api\.onTurnObservations\(setTurnObservations\)/);
+  assert.match(appSource, /unsubscribeTurnObservations\(\)/);
+  assert.match(appSource, /turnObservations=\{turnObservations\}/);
+  assert.match(appSource, /turnObservations:\s*TurnObservation\[\]/);
+  assert.match(appSource, /const newestTraceId = turnObservations\.at\(-1\)\?\.traceId \?\? ""/);
+  assert.match(appSource, /latestTurnObservations\.some\(\(observation\) => observation\.traceId === current\)/);
+  assert.match(appSource, /selectedObservation\.phase/);
+  assert.match(appSource, /formatTime\(selectedObservation\.at, language\)/);
+  assert.match(appSource, /selectedObservation\.acknowledgedParts !== undefined[\s\S]*?selectedObservation\.totalParts !== undefined[\s\S]*?acknowledgedParts\}\/\$\{selectedObservation\.totalParts\}/);
+  assert.match(appSource, /selectedObservation\.continuationCount \?\? copy\.unavailable/);
+  assert.match(appSource, /\["finished", "cancelled", "failed"\]\.includes\(selectedObservation\.phase\)/);
+  assert.match(appSource, /copy\.modelReportedWorkState[\s\S]*?selectedObservation\.workState/);
+  assert.match(appSource, /copy\.noTurnObservations/);
+  assert.doesNotMatch(appSource, /turnObservations[\s\S]{0,200}(percent|eta|stall)/i);
+  assert.equal((i18nSource.match(/modelReportedWorkState:/g) || []).length, 5);
+  assert.equal((i18nSource.match(/noTurnObservations:/g) || []).length, 5);
+  assert.match(stylesSource, /\.turn-observation-summary\s*\{[^}]*grid-template-columns:\s*repeat\(3, minmax\(0, 1fr\)\);/s);
+});
 
 test("embedded ChatGPT is measured only after its animated surface mounts", () => {
   assert.match(appSource, /const \[browserSlot, setBrowserSlot\] = useState<HTMLDivElement \| null>\(null\)/);
@@ -298,6 +343,20 @@ test("launcher shares only privacy-safe exported diagnostics", () => {
   assert.match(electronMain, /launcher:export-logs[\s\S]*?showSaveDialog[\s\S]*?exportSanitizedLogs/);
   assert.doesNotMatch(preloadSource, /launcher:open-logs/);
   assert.doesNotMatch(electronMain, /launcher:open-logs/);
+});
+
+test("launcher exports an allowlisted diagnostic report without implicit probes", () => {
+  assert.match(appSource, /exportDiagnosticReport\(selectedObservation\?\.traceId \?\? null\)/);
+  assert.match(preloadSource, /exportDiagnosticReport:[\s\S]*?launcher:export-diagnostic-report/);
+  const start = electronMain.indexOf('handle("launcher:export-diagnostic-report"');
+  const end = electronMain.indexOf('handle("launcher:update-install"', start);
+  const handler = electronMain.slice(start, end);
+
+  assert.ok(start >= 0 && end > start, "diagnostic report export handler must remain registered");
+  assert.match(handler, /buildDiagnosticReport\([\s\S]*?showSaveDialog[\s\S]*?saveDiagnosticReport/);
+  assert.match(handler, /if \(result\.canceled \|\| !result\.filePath\) return null;/);
+  assert.doesNotMatch(handler, /runtimeHost\.(?:doctor|devDoctor|setup|repair|cancel)/);
+  assert.doesNotMatch(handler, /browserHost\.(?:probeAuthentication|verifyConnector|reveal)/);
 });
 
 test("MCP verification failures stay inside the structured setup report", () => {
