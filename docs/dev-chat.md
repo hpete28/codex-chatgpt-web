@@ -129,19 +129,20 @@ and waits for its physical launcher settlement before closing the old surface; t
 starts a fresh Temporary Chat. This does not depend on ChatGPT rendering assistant text or a Copy
 action after the control-only response. If the retained private chat was already closed, the bridge
 starts one read-only fallback chat from the canonical Codex history instead. Browser-only mode
-has no retained MCP boundary and uses the six-message compaction path so its summarizer receives
-the complete expanded history.
+has no retained MCP boundary and uses the same adaptive multipart compaction path so its summarizer
+receives the complete expanded history.
 
-Any missing or malformed acknowledgement fails the whole transaction. No later part or final
+Any missing or malformed acknowledgement fails the whole transaction. No later stage or final
 commit is sent, and a retry starts again from part one in a fresh Temporary Chat. The model context
 and auto-compaction ceilings are reported as 3× while the switch is active, but every individual
 stage must still fit the selected ChatGPT mode's measured one-message boundary.
 
-Small turns use one request. Two-part turns use one inert staging request and one final request;
-six-part turns use five staging requests and one final request. Browser-only compaction also uses
-six parts. Inert stages use the fastest available mode that fits their complete messages; the final
-part uses the selected execution effort. Large turns may increase the probability of
-rate limits or a temporary account cooldown. The experiment is intentionally unavailable for Luna:
+Small turns use one request. Larger turns stage complete ordered records across two through eight
+inert context messages as needed, acknowledge every stage, then send one small execution commit at
+the selected effort. Extra transport stages reduce per-message pressure but never expand the 3×
+semantic context ceiling. Inert stages use the fastest available mode that can safely retain the
+accumulated context. Large turns may increase the probability of rate limits or a temporary account
+cooldown. The experiment is intentionally unavailable for Luna:
 Luna's later requests still include the accumulated transcript inside the same measured
 28,000-token browser transport budget.
 

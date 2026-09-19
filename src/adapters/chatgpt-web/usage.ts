@@ -63,9 +63,10 @@ export function estimateChatGptWebInputTokens(
 }
 
 /**
- * The compaction threshold chooses the initial part count. Whole records and composer limits
- * can require more parts even when the total token estimate is small. Plan before submission;
- * compaction always receives all six parts without passing through the legacy inline budget.
+ * The compaction threshold chooses the initial semantic part count. Whole records and composer
+ * limits can require more physical transport parts even when the total token estimate is small.
+ * Plan before submission; compaction keeps the three-times semantic ceiling while allowing the
+ * transport to expand from two through eight staged parts before the small execution commit.
  */
 export function resolveBiggerContextMultipartParts(
   parsed: CodexParsedRequest,
