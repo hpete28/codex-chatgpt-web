@@ -8,6 +8,7 @@ import {
   extractChatGptCompactionSourceRevision,
   extractChatGptContinuationEnvironmentClaim,
   extractChatGptCwdlessEnvironmentRefreshClaim,
+  extractChatGptSteeringEnvironmentClaim,
   extractChatGptTurnIdentity,
   extractChatGptThreadSpawnLineage,
   extractChatGptRootThreadMetadata,
@@ -174,8 +175,10 @@ export class ChatGptThreadEnvironmentStore {
         ? unattributedChatGptEnvironmentMessages(parsed) : undefined;
       const cwdlessRefresh = hasCurrentContext && !currentCompaction
         ? extractChatGptCwdlessEnvironmentRefreshClaim(parsed) : undefined;
-      if (hasCurrentContext && !currentCompaction && !historicalMessages && !cwdlessRefresh) throw error;
-      const currentClaim = currentCompaction ? extractChatGptContinuationEnvironmentClaim(parsed) : undefined;
+      const steeringClaim = hasCurrentContext && !currentCompaction
+        ? extractChatGptSteeringEnvironmentClaim(parsed) : undefined;
+      if (hasCurrentContext && !currentCompaction && !historicalMessages && !cwdlessRefresh && !steeringClaim) throw error;
+      const currentClaim = currentCompaction ? extractChatGptContinuationEnvironmentClaim(parsed) : steeringClaim;
       const rolloutIdentity = lineage ?? extractChatGptRootThreadMetadata(parsed);
       // Automatic compaction has a current turn_context; standalone compaction has only its
       // source turn_context. Either must be the latest native record, never an arbitrary ancestor.
@@ -193,7 +196,7 @@ export class ChatGptThreadEnvironmentStore {
         });
         if (rolloutEnvironment) {
           if (currentClaim && !sameAuthority(currentClaim, rolloutEnvironment)) {
-            throw new Error("Compaction continuation environment conflicts with its current Codex rollout");
+            throw new Error(`${currentCompaction ? "Compaction continuation" : "Steering"} environment conflicts with its current Codex rollout`);
           }
           if (cwdlessRefresh && !matchesCwdlessEnvironmentRefresh(rolloutEnvironment, cwdlessRefresh)) {
             throw new Error("Cwd-less Codex environment refresh conflicts with its current Codex rollout");

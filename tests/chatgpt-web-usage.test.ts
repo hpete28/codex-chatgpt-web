@@ -30,6 +30,7 @@ test("multipart selection accounts for whole-record and composer fit before subm
     [["small task"], undefined],
     [[50_000, 40_000, 50_000, 5_000].map(n => "word ".repeat(n)), 3],
     [Array.from({ length: 2 }, () => "a".repeat(530_000)), 2],
+    [Array.from({ length: 3 }, () => " ".repeat(450_000)), 2],
   ] as const) {
     const parsed = request("");
     parsed.context.messages = contents.map((content, index) => ({ role: "user", content, timestamp: index + 1 }));
@@ -41,7 +42,23 @@ test("multipart selection accounts for whole-record and composer fit before subm
         .toEqual([...contents]);
     }
   }
-}, 60_000);
+  // Low-token text can still exceed the reasoning model's server character ceiling.
+  // Stage the complete record instead of sending it inline or dropping its contents.
+  const sparsePro = request("x".repeat(600_000));
+  expect(resolveBiggerContextMultipartParts(sparsePro, capabilities)).toBe(2);
+  const stagedPro = compileChatGptWebPrompt(sparsePro, capabilities, undefined, { experimentalMultipartParts: 2 });
+  expect(stagedPro.multipart!.parts.flatMap(part => JSON.parse(part).records).map(record => record.message.content))
+    .toEqual([sparsePro.context.messages[0]!.content]);
+  const proMessages = compiledChatGptWebMessages(stagedPro);
+  const proStages = proMessages.slice(0, -1);
+  expect(proMessages.at(-1)!.length).toBeLessThanOrEqual(500_000);
+  expect(resolveChatGptWebMultipartStagingMode(
+    "gpt-5.6-sol",
+    capabilities,
+    Math.max(...proStages.map(message => estimateTokens(message))),
+    Math.max(...proStages.map(message => message.length)),
+  ).effort).toBe("max");
+}, 120_000);
 
 test("large Bigger Context uses smaller transport stages with a staging mode that can retain the full accumulated context", () => {
   const plus = { ...capabilities, proAvailable: false };
@@ -123,7 +140,7 @@ test("multipart planning leaves room for final attachments and execution instruc
     if (scenario.schema) parsed.options.outputFormat = {
       type: "json_schema", name: "result", strict: true, schema: { type: "string", description: "schema ".repeat(24_000) },
     };
-    const compiled = compileChatGptWebPrompt(parsed, caps, undefined, { experimentalMultipartParts: 3 });
+    const compiled = compileChatGptWebPrompt(parsed, caps, undefined, { experimentalMultipartParts: 6 });
     const records = compiled.multipart!.parts.flatMap(part => JSON.parse(part).records);
     expect(records.map(record => record.message_index)).toEqual(parsed.context.messages.map((_, index) => index));
     expect(records.slice(0, texts.length).map(record => record.message.content)).toEqual(texts);
@@ -138,7 +155,7 @@ test("multipart planning leaves room for final attachments and execution instruc
     const stage = resolveChatGptWebMultipartStagingMode(parsed.modelId, caps, maxStageMessageTokens, maxStageChars);
     expect(() => assertChatGptWebMultipartInputWithinLimits(
       estimateCompiledChatGptWebInputTokens(compiled, parsed.modelId), Math.max(...tokens),
-      parsed.modelId, "high", caps, Math.max(...chars), 3,
+      parsed.modelId, "high", caps, Math.max(...chars), 6,
       { stagingEffort: stage.effort, maxStageMessageTokens, maxStageChars, finalMessageTokens: tokens.at(-1)!, finalMessageChars: chars.at(-1)!, finalImageTokens: estimateChatGptWebImageTokens(compiled) },
     )).not.toThrow();
   }
