@@ -40,7 +40,7 @@ export async function mixedRootRequestPolicy(req: Request, config: AppConfig): P
       codexHome: getCodexHome(), threadId: identity.threadId, turnId: identity.turnId,
       model: body.model, parentThreadId: identity.parentThreadId, agentName: identity.agentName,
     });
-    const approved = availableChatGptWebModelRoutes(config).some(route => route.slug === body.model);
+    const approved = availableChatGptWebModelRoutes(config, true).some(route => route.slug === body.model);
     if (lineage.depth > 0 && !approved) {
       return { protected: true, rejection: reject("Protected descendant requires an approved chatgpt-web/* model before inference") };
     }

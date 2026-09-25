@@ -2,7 +2,6 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const { createHash } = require("node:crypto");
 const { EventEmitter } = require("node:events");
-const { createTurnObservationStore } = require("../electron/turn-observations.cjs");
 const fs = require("node:fs");
 const { resolve } = require("node:path");
 const {
@@ -20,43 +19,14 @@ const {
   isChatGptCloudflareChallengeResponse,
   isTemporaryChatUrl,
   loadCommittedBrowserSurface,
-  loadPrimaryBrowserSurface,
   MANUAL_COMPACTION_SUBMIT_TIMEOUT_MS,
   MANUAL_SUBMIT_TIMEOUT_MS,
   navigationErrorForLog,
   navigationOriginForLog,
 } = require("../electron/browser-host.cjs");
 
-test("released automatic turns accept only their owner's late terminal observation", async () => {
-  const fixture = Object.assign(Object.create(BrowserHost.prototype), {
-    turnTabs: new Map(), turnObservationStore: createTurnObservationStore(),
-    releasedObservationOwners: new Map(), closedTurnOwners: new Map(),
-    userCancelledTurnOwners: new Map(), logger: { info() {} },
-    syncPowerSaveBlocker() {}, snapshot() { return {}; }, publishState() {},
-    removeTurnTab(tab) { this.turnTabs.delete(tab.id); },
-  });
-  const at = "2026-09-18T22:00:00.000Z";
-  for (let i = 0; i < 22; i++) {
-    const traceId = `released-${i}`;
-    fixture.turnTabs.set(traceId, { id: traceId, traceId, helperPid: 123,
-      view: { webContents: { isDestroyed: () => true } } });
-    assert.equal(fixture.observeTurn(traceId, 123, { traceId, sequence: 1, at, phase: "preparing" }), true);
-    await fixture.endTurn(traceId, 123, "failed", false);
-  }
-  assert.equal(fixture.closedTurnOwners.size, 0);
-  assert.equal(fixture.releasedObservationOwners.size, 20);
-  const terminal = { traceId: "released-21", sequence: 2, at, phase: "failed" };
-  assert.equal(fixture.observeTurn(terminal.traceId, 456, terminal), false);
-  assert.equal(fixture.observeTurn(terminal.traceId, 123, { ...terminal, phase: "responding" }), false);
-  assert.equal(fixture.observeTurn("unknown", 123, { ...terminal, traceId: "unknown" }), false);
-  assert.equal(fixture.observeTurn("released-0", 123, { ...terminal, traceId: "released-0" }), false);
-  assert.equal(fixture.observeTurn(terminal.traceId, 123, terminal), true);
-  assert.equal(fixture.turnObservationStore.get(terminal.traceId).phase, "failed");
-  assert.equal(fixture.observeTurn(terminal.traceId, 123, { ...terminal, sequence: 3 }), false);
-});
-
-test("manual prompt handoff keeps ordinary turns at thirty seconds and compaction at two minutes", () => {
-  assert.equal(MANUAL_SUBMIT_TIMEOUT_MS, 30_000);
+test("manual prompt handoff keeps ordinary turns at one minute and compaction at two minutes", () => {
+  assert.equal(MANUAL_SUBMIT_TIMEOUT_MS, 60_000);
   assert.equal(MANUAL_COMPACTION_SUBMIT_TIMEOUT_MS, 120_000);
 });
 
@@ -103,6 +73,7 @@ test("descriptor publishes native surface identities without inspecting renderer
 test("mode transitions publish targets before setup inspection and restore them on rollback", async () => {
   const dir = fs.mkdtempSync(require("node:path").join(require("node:os").tmpdir(), "browser-mode-targets-"));
   let savedMode = "manual";
+  const announcementModes = [];
   const fixture = Object.assign(Object.create(BrowserHost.prototype), {
     surfaceId: "h".repeat(32),
     view: { webContents: { isDestroyed: () => false, getOrCreateDevToolsTargetId: () => "home-target" } },
@@ -111,6 +82,7 @@ test("mode transitions publish targets before setup inspection and restore them 
     profile: "production", cdpPort: 40000, partition: "persist:codex-web-gpt-chatgpt",
     control: {}, helper: {}, descriptorPath: require("node:path").join(dir, "descriptor.json"),
     markOwnedSurface: async () => {},
+    configureAnnouncementDismissal: async enabled => announcementModes.push(enabled),
   });
   const targets = () => JSON.parse(fs.readFileSync(fixture.descriptorPath, "utf8")).surfaceTargets;
   const automaticTargets = { [fixture.surfaceId]: "home-target" };
@@ -141,6 +113,12 @@ test("mode transitions publish targets before setup inspection and restore them 
     savedMode = "manual";
     assert.deepEqual(targets(), {});
     assert.equal(fixture.currentOperation(), null);
+    await assert.rejects(fixture.withInteractionModeChange("automatic", async commit => {
+      await commit();
+      throw new Error("runtime failed after browser commit");
+    }), /runtime failed after browser commit/);
+    assert.deepEqual(targets(), {});
+    assert.deepEqual(announcementModes, [false, true, false, true, false, true, false]);
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -210,130 +188,7 @@ test("primary browser bootstrap fails closed on navigation, renderer, and timeou
   }
 });
 
-test("primary browser initialization retries one stalled idle commit and then succeeds", async () => {
-  const keepTestAlive = setTimeout(() => {}, 100);
-  try {
-    const calls = [];
-    const logs = [];
-    const contents = new EventEmitter();
-    let currentUrl = "about:blank";
-    let loads = 0;
-    contents.isDestroyed = () => false;
-    contents.getURL = () => currentUrl;
-    contents.stop = () => calls.push("stop");
-    contents.loadURL = async (url) => {
-      loads += 1;
-      calls.push(["load", url]);
-      if (loads === 1) return await new Promise(() => {});
-      currentUrl = url;
-    };
-
-    await loadPrimaryBrowserSurface(contents, {
-      warn: (event, detail) => logs.push([event, detail]),
-    }, { attempts: 2, timeoutMs: 5, retryDelayMs: 0 });
-
-    assert.deepEqual(calls, [
-      ["load", IDLE_BROWSER_URL],
-      "stop",
-      ["load", IDLE_BROWSER_URL],
-    ]);
-    assert.equal(currentUrl, IDLE_BROWSER_URL);
-    assert.deepEqual(logs, [["browser.initialization_retry", {
-      attempt: 1,
-      nextAttempt: 2,
-      maxAttempts: 2,
-      reason: "idle_document_timeout",
-    }]]);
-  } finally {
-    clearTimeout(keepTestAlive);
-  }
-});
-
-test("primary browser initialization ignores delayed aborted loads from a timed-out attempt", async () => {
-  const keepTestAlive = setTimeout(() => {}, 100);
-  try {
-    const contents = new EventEmitter();
-    let currentUrl = "about:blank";
-    let loads = 0;
-    let stops = 0;
-    contents.isDestroyed = () => false;
-    contents.getURL = () => currentUrl;
-    contents.loadURL = (url) => {
-      loads += 1;
-      if (loads === 3) {
-        setTimeout(() => {
-          currentUrl = url;
-          contents.emit("did-finish-load");
-        }, 3);
-      }
-      return new Promise(() => {});
-    };
-    contents.stop = () => {
-      stops += 1;
-      if (stops === 2) {
-        setTimeout(() => contents.emit(
-          "did-fail-load", {}, -3, "", IDLE_BROWSER_URL, true,
-        ), 1);
-      }
-    };
-
-    await loadPrimaryBrowserSurface(contents, null, {
-      attempts: 3,
-      timeoutMs: 5,
-      retryDelayMs: 0,
-    });
-
-    assert.equal(loads, 3);
-    assert.equal(stops, 2);
-    assert.equal(currentUrl, IDLE_BROWSER_URL);
-  } finally {
-    clearTimeout(keepTestAlive);
-  }
-});
-
-test("primary browser initialization does not retry terminal failures and bounds stalled retries", async () => {
-  const keepTestAlive = setTimeout(() => {}, 100);
-  try {
-    const failed = new EventEmitter();
-    let failedLoads = 0;
-    failed.isDestroyed = () => false;
-    failed.getURL = () => "about:blank";
-    failed.stop = () => {};
-    failed.loadURL = () => {
-      failedLoads += 1;
-      queueMicrotask(() => failed.emit(
-        "did-fail-load", {}, -2, "ERR_FAILED", IDLE_BROWSER_URL, true,
-      ));
-      return new Promise(() => {});
-    };
-    await assert.rejects(
-      loadPrimaryBrowserSurface(failed, null, { attempts: 3, timeoutMs: 50, retryDelayMs: 0 }),
-      /idle document failed: ERR_FAILED \(-2\)/,
-    );
-    assert.equal(failedLoads, 1);
-
-    const stalled = new EventEmitter();
-    let stalledLoads = 0;
-    let stops = 0;
-    stalled.isDestroyed = () => false;
-    stalled.getURL = () => "about:blank";
-    stalled.stop = () => { stops += 1; };
-    stalled.loadURL = () => {
-      stalledLoads += 1;
-      return new Promise(() => {});
-    };
-    await assert.rejects(
-      loadPrimaryBrowserSurface(stalled, null, { attempts: 2, timeoutMs: 5, retryDelayMs: 0 }),
-      /idle document did not commit within 5ms/,
-    );
-    assert.equal(stalledLoads, 2);
-    assert.equal(stops, 2);
-  } finally {
-    clearTimeout(keepTestAlive);
-  }
-});
-
-function manualTabNavigationFixture(remoteError) {
+function manualTabNavigationFixture(remoteError, chatUrl = "https://chatgpt.com/?temporary-chat=true") {
   const calls = [];
   const logs = [];
   const terminal = [];
@@ -346,12 +201,14 @@ function manualTabNavigationFixture(remoteError) {
     calls.push(["load", url]);
     if (url === IDLE_BROWSER_URL) {
       currentUrl = url;
+      tab.url = url;
       return;
     }
     throw remoteError;
   };
   const tab = {
     id: "manual-edit-retry",
+    url: chatUrl,
     traceId: "trace-edit-retry",
     manualState: "awaiting-user",
     view: { webContents: contents },
@@ -370,19 +227,21 @@ function manualTabNavigationFixture(remoteError) {
 }
 
 test("manual edit retry survives Electron superseding the ChatGPT navigation", async () => {
-  const observed = manualTabNavigationFixture(
-    new Error("ERR_ABORTED (-3) loading 'https://chatgpt.com/?temporary-chat=true'"),
-  );
+  for (const chatUrl of ["https://chatgpt.com/?temporary-chat=true", "https://chatgpt.com/"]) {
+    const observed = manualTabNavigationFixture(
+      new Error(`ERR_ABORTED (-3) loading ${chatUrl}`), chatUrl,
+    );
 
-  await observed.fixture.initializeManualTurnTab(observed.tab);
+    await observed.fixture.initializeManualTurnTab(observed.tab);
 
-  assert.deepEqual(observed.calls, [
-    ["load", IDLE_BROWSER_URL],
-    ["load", "https://chatgpt.com/?temporary-chat=true"],
-  ]);
-  assert.equal(observed.fixture.turnTabs.has(observed.tab.id), true);
-  assert.deepEqual(observed.terminal, []);
-  assert.equal(observed.logs.some(([, event]) => event === "browser.manual_tab_navigation_superseded"), true);
+    assert.deepEqual(observed.calls, [
+      ["load", IDLE_BROWSER_URL],
+      ["load", chatUrl],
+    ]);
+    assert.equal(observed.fixture.turnTabs.has(observed.tab.id), true);
+    assert.deepEqual(observed.terminal, []);
+    assert.equal(observed.logs.some(([, event]) => event === "browser.manual_tab_navigation_superseded"), true);
+  }
 });
 
 test("manual ChatGPT navigation still fails closed on a real load failure", async () => {
@@ -397,14 +256,13 @@ test("manual ChatGPT navigation still fails closed on a real load failure", asyn
   assert.equal(observed.logs.some(([, event]) => event === "browser.manual_tab_navigation_failed"), true);
 });
 
-test("primary browser initialization keeps its hidden renderer schedulable without inspecting the idle DOM", async () => {
+test("primary browser initialization keeps its view offscreen but visible until ownership is committed", async () => {
   const calls = [];
   let currentUrl = "about:blank";
   const contents = new EventEmitter();
   contents.isDestroyed = () => false;
   contents.getURL = () => currentUrl;
   contents.stop = () => calls.push("stop");
-  contents.setBackgroundThrottling = enabled => calls.push(["throttling", enabled]);
   contents.loadURL = async (url) => {
     calls.push(["load", url]);
     currentUrl = url;
@@ -417,7 +275,7 @@ test("primary browser initialization keeps its hidden renderer schedulable witho
       webContents: contents,
     },
     hiddenTurnBounds: () => hiddenBounds,
-    markOwnedSurface: async () => assert.fail("idle startup must not inspect the DOM"),
+    markOwnedSurface: async () => calls.push("owned"),
     syncViewVisibility: () => calls.push("sync"),
     writeDescriptor: () => calls.push("descriptor"),
     logger: { info: (event, detail) => calls.push([event, detail]) },
@@ -428,44 +286,11 @@ test("primary browser initialization keeps its hidden renderer schedulable witho
   assert.deepEqual(calls, [
     ["bounds", hiddenBounds],
     ["visible", true],
-    ["throttling", false],
     ["load", IDLE_BROWSER_URL],
-    ["throttling", true],
+    "owned",
     "sync",
     "descriptor",
     ["browser.initialized", { url: IDLE_BROWSER_URL }],
-  ]);
-});
-
-test("an idle home load never starts DOM ownership or authentication work", async () => {
-  const calls = [];
-  const contents = new EventEmitter();
-  contents.getURL = () => IDLE_BROWSER_URL;
-  contents.setWindowOpenHandler = () => {};
-  const fixture = Object.assign(Object.create(BrowserHost.prototype), {
-    view: { webContents: contents },
-    turnTabs: new Map(),
-    manualOperation: null,
-    getBrowserInteractionMode: () => "automatic",
-    clearHomeNavigationTimeout: () => calls.push("clear-timeout"),
-    setState: patch => calls.push(["state", patch]),
-    applyViewportCss: async () => calls.push("css"),
-    markOwnedSurface: async () => calls.push("owned"),
-    probeAuthentication: async () => calls.push("probe"),
-    logger: {
-      info: (event, detail) => calls.push(["info", event, detail]),
-      warn: (event, detail) => calls.push(["warn", event, detail]),
-      error: (event, detail) => calls.push(["error", event, detail]),
-    },
-  });
-
-  BrowserHost.prototype.bindWebContents.call(fixture);
-  contents.emit("did-finish-load");
-  await new Promise(resolve => setImmediate(resolve));
-
-  assert.deepEqual(calls, [
-    "clear-timeout",
-    ["state", { url: IDLE_BROWSER_URL, loading: false }],
   ]);
 });
 
@@ -762,6 +587,44 @@ test("hidden turn tabs receive an explicit renderer viewport before moving offsc
   assert.equal(tab.deviceEmulationDirty, false);
 });
 
+test("hidden primary checks retain a renderer viewport across resize and navigation, then restore native bounds", () => {
+  const calls = [];
+  let size = [1120, 720];
+  const fixture = Object.assign(Object.create(BrowserHost.prototype), {
+    primaryRendererReady: false, primaryDeviceEmulationDirty: true,
+    primaryDeviceEmulationViewport: null,
+    bounds: { x: 280, y: 64, width: 840, height: 656 },
+    window: { getContentSize: () => size },
+    view: {
+      setBounds: value => calls.push(["bounds", value]), setVisible: value => calls.push(["visible", value]),
+      webContents: {
+        enableDeviceEmulation: value => calls.push(["emulate", value.viewSize]),
+        disableDeviceEmulation: () => calls.push(["disable"]),
+      },
+    },
+  });
+  fixture.presentPrimaryView(false);
+  assert.equal(calls.some(([event]) => event === "emulate"), false);
+  fixture.primaryRendererReady = true;
+  fixture.presentPrimaryView(false);
+  assert.deepEqual(calls.slice(-3), [["emulate", { width: 1120, height: 720 }],
+    ["bounds", { x: 1121, y: 721, width: 1120, height: 720 }], ["visible", true]]);
+  fixture.presentPrimaryView(false);
+  assert.equal(calls.filter(([event]) => event === "emulate").length, 1);
+  fixture.primaryDeviceEmulationDirty = true;
+  fixture.presentPrimaryView(false);
+  size = [1280, 800];
+  fixture.presentPrimaryView(false);
+  assert.deepEqual(fixture.primaryDeviceEmulationViewport, { width: 1280, height: 800 });
+  assert.equal(calls.filter(([event]) => event === "emulate").length, 3);
+  fixture.presentPrimaryView(true);
+  assert.deepEqual(calls.slice(-3), [["bounds", fixture.bounds], ["disable"], ["visible", true]]);
+  assert.equal(fixture.primaryDeviceEmulationViewport, null);
+  fixture.getBrowserInteractionMode = () => "manual";
+  fixture.presentPrimaryView(false);
+  assert.equal(calls.filter(([event]) => event === "emulate").length, 3);
+});
+
 test("turn tabs use the hidden viewport when the launcher window is hidden", () => {
   const events = [];
   const tab = {
@@ -1019,6 +882,41 @@ test("launcher authentication requires the Temporary Chat composer and complete 
   assert.equal(result.status, "ready");
 });
 
+test("authentication finds the new composer only in its ChatGPT form", async () => {
+  const vm = require("node:vm");
+  const { createDocument } = require("@mixmark-io/domino");
+  const url = "https://chatgpt.com/?temporary-chat=true";
+  for (const owned of [true, false]) {
+    const document = createDocument(`<form ${owned ? "data-chatgpt-composer" : ""}>
+      <div data-composer-markdown contenteditable="true" role="textbox"></div></form>`);
+    const editor = document.querySelector("[data-composer-markdown]");
+    Object.defineProperties(editor, {
+      isConnected: { value: true },
+      getBoundingClientRect: { value: () => ({ width: 300, height: 60 }) },
+    });
+    const fixture = {
+      state: { authenticated: false }, activeTraceId: null, manualOperation: null,
+      view: { webContents: {
+        isDestroyed: () => false, getURL: () => url,
+        executeJavaScript: script => vm.runInNewContext(script, {
+          location: { href: url },
+          document: { readyState: "complete", querySelectorAll: selector => document.querySelectorAll(selector) },
+          getComputedStyle: () => ({ display: "block", visibility: "visible", opacity: "1" }),
+          URL, AbortController, setTimeout, clearTimeout,
+          fetch: async () => ({ ok: true, status: 200, url: "https://chatgpt.com/api/auth/session",
+            headers: { get: () => "application/json" },
+            json: async () => ({ user: { id: "fixture" }, expires: "2099-01-01T00:00:00Z" }),
+          }),
+        }),
+      } },
+      setState(patch) { this.state = { ...this.state, ...patch }; },
+      snapshot() { return { ...this.state }; }, logger: { info() {} },
+    };
+    const result = await BrowserHost.prototype.probeAuthentication.call(fixture);
+    assert.equal(result.authenticated, owned);
+  }
+});
+
 test("session verification distinguishes a missing login from network and invalid-response failures", async () => {
   const vm = require("node:vm");
   const url = "https://chatgpt.com/?temporary-chat=true";
@@ -1082,6 +980,38 @@ test("authentication windows stay inside the launcher-owned browser partition", 
   assert.match(source, /createWindow:\s*\(options\)\s*=>\s*this\.createAuthView\(options,\s*url\)/);
   assert.match(source, /webContents:\s*options\.webContents/);
   assert.doesNotMatch(source, /loginWithSystemBrowser|captureSystemBrowserLogin|system_login_started/);
+});
+
+test("concurrent authentication probes share the same navigation and allow the next refresh", async () => {
+  let probes = 0;
+  let navigations = 0;
+  let release;
+  let temporary = false;
+  const ready = new Promise(resolve => { release = resolve; });
+  const fixture = Object.assign(Object.create(BrowserHost.prototype), {
+    turnTabs: new Map(),
+    state: { authenticated: false }, manualOperation: "ChatGPT login",
+    view: { webContents: {
+      isDestroyed: () => false,
+      getURL: () => "https://chatgpt.com/",
+      executeJavaScript: async () => {
+        probes += 1;
+        await ready;
+        return { composer: true, temporary, sessionAuthenticated: true, url: "https://chatgpt.com/", readyState: "complete" };
+      },
+      loadURL: async () => { navigations += 1; temporary = true; },
+    } },
+    setState(patch) { this.state = { ...this.state, ...patch }; },
+    snapshot() { return this.state; }, logger: { info() {} },
+  });
+  const first = fixture.probeAuthentication();
+  const second = fixture.probeAuthentication();
+  release();
+  await Promise.all([first, second]);
+  assert.equal(navigations, 1);
+  assert.equal(probes, 2); // initial surface, then the one navigated temporary surface
+  await fixture.probeAuthentication();
+  assert.equal(probes, 3); // the settled operation must not cache stale authentication
 });
 
 test("concurrent embedded login requests share one authentication operation", async () => {
@@ -2458,7 +2388,7 @@ test("a retained conversation is not reused for a different connector identity",
     turnTabs: new Map([[retained.id, retained]]),
     userCancelledTurnOwners: new Map(),
     createTurnTab: (...args) => {
-      assert.deepEqual(args, ["trace_next", 222, conversationKey, "Other Connector"]);
+      assert.deepEqual(args, ["trace_next", 222, conversationKey, "Other Connector", undefined]);
       return created;
     },
     writeDescriptor() {},
@@ -2944,9 +2874,11 @@ test("manual confirmation deadlines end at Sent so slow model startup can still 
   );
   const ordinaryTab = fixture.turnTabs.get(ordinary.tabId);
   const compactionTab = fixture.turnTabs.get(compaction.tabId);
-  assert.equal(ordinaryTab.manualSubmitTimeoutMs, 30_000);
+  assert.equal(ordinaryTab.manualSubmitTimeoutMs, 60_000);
   assert.equal(compactionTab.manualSubmitTimeoutMs, 120_000);
   t.mock.timers.tick(31_000);
+  assert.equal(ordinaryTab.manualState, "awaiting-user");
+  t.mock.timers.tick(29_000);
   assert.equal(ordinaryTab.manualState, "timed-out");
   assert.equal(compactionTab.manualState, "awaiting-user");
 
@@ -3350,6 +3282,7 @@ test("switching from Zero Risk to Automatic marks the already-loaded primary sur
     surfaceId: "automatic-primary-surface",
     view: { webContents: {
       executeJavaScript: async script => { scripts.push(script); },
+      isDestroyed: () => false,
     } },
     snapshot: () => ({ activeTabId: "home" }),
   });
@@ -3358,9 +3291,10 @@ test("switching from Zero Risk to Automatic marks the already-loaded primary sur
     await commit();
     return "configured";
   }), "configured");
-  assert.equal(scripts.length, 1);
+  assert.equal(scripts.length, 2);
   assert.match(scripts[0], /__CODEX_WEB_GPT_SURFACE_ID__/);
   assert.match(scripts[0], /automatic-primary-surface/);
+  assert.match(scripts[1], /configureChatGptAnnouncementDismissal/);
 });
 
 test("a failed Automatic ownership proof stays inside the runtime rollback boundary", async () => {
@@ -3425,8 +3359,10 @@ test("Zero Risk fails closed at every primary-surface inspection boundary", asyn
   });
   await assert.rejects(fixture.applyViewportCss(), /disabled in Zero Risk mode/);
   await assert.rejects(fixture.markOwnedSurface(), /disabled in Zero Risk mode/);
+  await assert.rejects(fixture.configureAnnouncementDismissal(true), /disabled in Zero Risk mode/);
   await assert.rejects(fixture.probeAuthentication(), /disabled in Zero Risk mode/);
   await assert.rejects(fixture.inspectSession(true), /disabled in Zero Risk mode/);
+  await assert.rejects(fixture.inspectLimitsPlan(), /disabled in Zero Risk mode/);
   assert.equal(domOperations, 0);
 });
 
@@ -3466,4 +3402,70 @@ test("manual turns have no live-session TTL but are revoked when their owner pro
     helperPid: dead.helperPid,
     status: "failed",
   });
+});
+
+test("off-on-off fresh conversation changes retire completed history before it can be reused", async () => {
+  const vm = require("node:vm");
+  const { releaseRetainedConversation } = require("../electron/retained-turn-release.cjs");
+  const main = fs.readFileSync(resolve(__dirname, "../electron/main.cjs"), "utf8");
+  for (const savedChats of [false, true]) {
+    const property = savedChats ? "useSavedChats" : "experimentalFreshConversationPerTurn";
+    const method = savedChats ? "setUseSavedChats" : "setFreshConversationPerTurn";
+    const channel = savedChats ? "launcher:use-saved-chats" : "launcher:fresh-conversation-per-turn";
+    const nextChannel = savedChats ? "launcher:zero-risk-pro" : "launcher:use-saved-chats";
+    const key = "a".repeat(64);
+    const stale = { id: "old-chat", traceId: "old-turn", status: "ready", interactionMode: "automatic",
+      conversationKey: key, connectorIdentity: "Codex Native2", connectorBound: true };
+    const manual = { id: "manual-chat", status: "ready", interactionMode: "manual", conversationKey: "b".repeat(64) };
+    const state = { experimentalFreshConversationPerTurn: false, useSavedChats: false };
+    const config = { experimentalFreshConversationPerTurn: false, useSavedChats: false };
+    let handler, failSetup = true, commit;
+    const removed = [];
+    const fixture = Object.assign(Object.create(BrowserHost.prototype), {
+      manualOperation: null, turnTabs: new Map([[stale.id, stale], [manual.id, manual]]),
+      userCancelledTurnOwners: new Map(), selectedTabId: "home", logger: { info() {} },
+      syncViewVisibility() {}, snapshot: () => ({}), publishState() {}, writeDescriptor() {},
+      removeTurnTab(tab, abortRunning) {
+        assert.equal(abortRunning, false);
+        assert.equal(tab.status, "ready");
+        removed.push(tab.id);
+        this.turnTabs.delete(tab.id);
+      },
+      createTurnTab: async () => ({ id: "new-chat", surfaceId: "new-surface" }),
+    });
+    vm.runInNewContext(main.slice(main.indexOf("function syncFreshConversationPreference("), main.indexOf("function registerIpc(")) +
+      main.slice(main.indexOf(`handle("${channel}",`),
+      main.indexOf(`handle("${nextChannel}",`)), {
+      handle: (_channel, callback) => { handler = callback; }, browserHost: fixture, releaseRetainedConversation,
+      runtimeHost: { currentOperation: () => null, runtimeConfigSnapshot: () => ({ config }), [method]: async enabled => {
+        if (failSetup) throw new Error("setup rejected");
+        await new Promise(resolve => { commit = resolve; });
+        config[property] = enabled;
+        return { enabled };
+      } },
+      stateStore: { read: () => ({ ...state }), update: patch => Object.assign(state, patch) }, send() {},
+    });
+    await assert.rejects(() => handler(null, true), /setup rejected/);
+    assert.equal(fixture.turnTabs.get(stale.id), stale, "failed setup preserves prior history");
+    failSetup = false;
+    const enabling = handler(null, true);
+    assert.equal(fixture.turnTabs.has(stale.id), true, "pending setup must not release history");
+    // A concurrent running lease must not be cancelled, even if it shares the released key.
+    const running = { id: "concurrent", traceId: "concurrent-turn", status: "running", interactionMode: "automatic", conversationKey: key };
+    fixture.turnTabs.set(running.id, running);
+    commit();
+    await enabling;
+    assert.deepEqual(removed, savedChats ? [stale.id, manual.id] : [stale.id]);
+    assert.equal(fixture.turnTabs.get(running.id), running);
+    assert.equal(fixture.turnTabs.get(manual.id), savedChats ? undefined : manual);
+    fixture.turnTabs.delete(running.id);
+    const disabling = handler(null, false);
+    commit();
+    await disabling;
+    const lease = await fixture.beginTurn("new-turn", false, 123, key, "Codex Native2");
+    assert.equal(lease.reused, false);
+    assert.equal(lease.tabId, "new-chat");
+    assert.equal(state[property], false);
+    assert.equal(fixture.turnTabs.get(manual.id), savedChats ? undefined : manual);
+  }
 });

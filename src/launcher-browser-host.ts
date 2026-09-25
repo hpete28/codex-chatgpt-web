@@ -243,11 +243,8 @@ export async function selectLauncherPage(
           targetIds.set(candidate.page, targetInfo.targetId);
         }
       } catch {
-        // A renderer or target can be temporarily unavailable while another tab is busy. Leave the
-        // result uncached so a later loop can retry without making this page block its peers.
+        // Retry the target later without allowing one stalled renderer to block its peers.
       } finally {
-        // Target identity has already been captured. Do not make selection wait for a detach from a
-        // renderer that may itself be stalled; the session can finish cleaning up independently.
         void session.detach().catch(() => {});
       }
     })().finally(() => {
@@ -261,9 +258,6 @@ export async function selectLauncherPage(
       throw new DOMException("Launcher browser connection aborted", "AbortError");
     }
     const candidates = browser.contexts().flatMap(context => context.pages().map(page => ({ context, page })));
-    // Probe native target ownership concurrently, but never wait for every renderer. A single
-    // unrelated hung ChatGPT tab must not prevent acquisition of the responsive surface that owns
-    // this turn. Reuse an in-flight probe rather than stacking repeated CDP attaches while waiting.
     const probes = candidates.map(startTargetProbe);
     if (probes.length > 0) {
       const remainingMs = Math.max(1, deadline - Date.now());
@@ -391,6 +385,18 @@ export const LAUNCHER_CAPABILITY_INSPECTION_TIMEOUT_MS = 120_000;
 
 export type LauncherTurnActivity =
   | {
+      phase: "usage";
+      traceId: string;
+      helperPid: number;
+      receipt?: {
+        id: string;
+        accountKey: string;
+        model: "gpt-6-pro" | "gpt-5.6-pro" | "pro-unknown" | "other";
+        at: number;
+      };
+      trackingError?: "account-unavailable";
+    }
+  | {
       phase: "start";
       traceId: string;
       helperPid: number;
@@ -438,11 +444,11 @@ export interface TurnObservation {
   workState?: "continue" | "complete" | "blocked";
 }
 
-export const LAUNCHER_TURN_START_TIMEOUT_MS = 5_000;
+// Startup must outlast the launcher's ten-second idle bootstrap. This is not a model-turn budget.
+export const LAUNCHER_TURN_START_TIMEOUT_MS = 30_000;
 export const LAUNCHER_TURN_HEARTBEAT_INTERVAL_MS = 10_000;
 export const LAUNCHER_TURN_HEARTBEAT_TIMEOUT_MS = 5_000;
 export const LAUNCHER_TURN_END_TIMEOUT_MS = 15_000;
-export const LAUNCHER_TURN_OBSERVATION_TIMEOUT_MS = 1_500;
 
 export interface LauncherManualTurnOwner {
   traceId: string;
@@ -674,94 +680,103 @@ export async function notifyLauncherTurn(
     : activity.phase === "heartbeat"
       ? LAUNCHER_TURN_HEARTBEAT_TIMEOUT_MS
       : LAUNCHER_TURN_START_TIMEOUT_MS,
+  signal?: AbortSignal,
 ): Promise<{
   surfaceId?: string;
   reused?: boolean;
   connectorBound?: boolean;
   cancelledByUser?: boolean;
+  trackUsage?: boolean;
 }> {
-  // Start and heartbeat are idempotent for a trace, so a brief local control-channel interruption
-  // should not fail the Codex turn. Re-read the descriptor for each retry so a recovered launcher
-  // can publish a fresh loopback endpoint/token. End is intentionally not retried here because a
-  // lost response may arrive after the launcher already released a non-retained tab.
-  const retryDelaysMs = activity.phase === "end" ? [] : [100, 300];
-  for (let attempt = 0; ; attempt += 1) {
+  // Start and heartbeat are idempotent for a trace, so retry brief local transport failures.
+  // End is not retried because the launcher may already have released the owned surface.
+  const retryDelaysMs = activity.phase === "end" ? [0] : [0, 100, 300];
+  for (let attempt = 0; attempt < retryDelaysMs.length; attempt += 1) {
+    const delay = retryDelaysMs[attempt]!;
+    if (delay > 0) await new Promise(resolveRetry => setTimeout(resolveRetry, delay));
+    if (signal?.aborted) throw new DOMException("Launcher browser acquisition cancelled", "AbortError");
+
+    // Re-read on every retry so launcher recovery can publish a new endpoint/token.
     const descriptor = readLauncherBrowserHostDescriptor(descriptorPath);
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
-    let response: Response;
     try {
-      response = await fetch(`${descriptor.control.endpoint}/v1/turn/${activity.phase}`, {
+      const response = await fetch(`${descriptor.control.endpoint}/v1/turn/${activity.phase}`, {
         method: "POST",
         headers: {
           authorization: `Bearer ${descriptor.control.token}`,
           "content-type": "application/json",
         },
         body: JSON.stringify(activity),
-        signal: controller.signal,
+        signal: signal ? AbortSignal.any([controller.signal, signal]) : controller.signal,
       });
+      if (!response.ok) {
+        const body = await response.json().catch(() => ({})) as Record<string, unknown>;
+        if (response.status === 409 && body.code === "turn_cancelled") {
+          throw new LauncherBrowserTurnCancelledError(
+            typeof body.error === "string" ? body.error : `Browser turn ${activity.traceId} was cancelled by the user`,
+          );
+        }
+        if (response.status === 409 && body.code === "retained_conversation_unavailable") {
+          throw new LauncherRetainedConversationUnavailableError(
+            typeof body.error === "string" ? body.error : "The retained ChatGPT conversation is no longer available",
+          );
+        }
+        const detail = typeof body.error === "string" ? body.error : "";
+        throw new Error(`HTTP ${response.status}${detail ? `: ${detail}` : ""}`);
+      }
+      const body = await response.json().catch(() => ({})) as Record<string, unknown>;
+      if (activity.phase === "start") {
+        if (typeof body.surfaceId !== "string" || !/^[A-Za-z0-9_-]{32}$/.test(body.surfaceId)) {
+          throw new Error("Launcher browser control channel returned an invalid turn surface id");
+        }
+        if (typeof body.reused !== "boolean") {
+          throw new Error("Launcher browser control channel returned an invalid reuse state");
+        }
+        if (typeof body.connectorBound !== "boolean") {
+          throw new Error("Launcher browser control channel returned an invalid connector state");
+        }
+        return {
+          surfaceId: body.surfaceId,
+          reused: body.reused,
+          connectorBound: body.connectorBound,
+          trackUsage: body.trackUsage === true,
+        };
+      }
+      if (activity.phase === "end") {
+        if (typeof body.cancelledByUser !== "boolean") {
+          throw new Error("Launcher browser control channel returned an invalid turn release result");
+        }
+        return { cancelledByUser: body.cancelledByUser };
+      }
+      return {};
     } catch (error) {
-      const transportError = new LauncherBrowserControlTransportError(
-        `Launcher browser control channel failed: ${error instanceof Error ? error.message : String(error)}`,
-      );
-      if (attempt >= retryDelaysMs.length) throw transportError;
-      await new Promise(resolveRetry => setTimeout(resolveRetry, retryDelaysMs[attempt]!));
-      continue;
+      if (signal?.aborted) throw new DOMException("Launcher browser acquisition cancelled", "AbortError");
+      if (controller.signal.aborted) {
+        throw new Error(`Launcher browser control ${activity.phase} timed out after ${timeoutMs}ms`);
+      }
+      if (error instanceof LauncherBrowserTurnCancelledError
+        || error instanceof LauncherRetainedConversationUnavailableError) throw error;
+      if (attempt === retryDelaysMs.length - 1) {
+        throw new LauncherBrowserControlTransportError(
+          `Launcher browser control channel failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
     } finally {
       clearTimeout(timer);
     }
-
-    if (!response.ok) {
-      const body = await response.json().catch(() => ({})) as Record<string, unknown>;
-      if (response.status === 409 && body.code === "turn_cancelled") {
-        throw new LauncherBrowserTurnCancelledError(
-          typeof body.error === "string" ? body.error : `Browser turn ${activity.traceId} was cancelled by the user`,
-        );
-      }
-      if (response.status === 409 && body.code === "retained_conversation_unavailable") {
-        throw new LauncherRetainedConversationUnavailableError(
-          typeof body.error === "string" ? body.error : "The retained ChatGPT conversation is no longer available",
-        );
-      }
-      const detail = typeof body.error === "string" ? body.error : "";
-      throw new Error(`Launcher browser control channel failed: HTTP ${response.status}${detail ? `: ${detail}` : ""}`);
-    }
-    const body = await response.json().catch(() => ({})) as Record<string, unknown>;
-    if (activity.phase === "start") {
-      if (typeof body.surfaceId !== "string" || !/^[A-Za-z0-9_-]{32}$/.test(body.surfaceId)) {
-        throw new Error("Launcher browser control channel returned an invalid turn surface id");
-      }
-      if (typeof body.reused !== "boolean") {
-        throw new Error("Launcher browser control channel returned an invalid reuse state");
-      }
-      if (typeof body.connectorBound !== "boolean") {
-        throw new Error("Launcher browser control channel returned an invalid connector state");
-      }
-      return {
-        surfaceId: body.surfaceId,
-        reused: body.reused,
-        connectorBound: body.connectorBound,
-      };
-    }
-    if (activity.phase === "end") {
-      if (typeof body.cancelledByUser !== "boolean") {
-        throw new Error("Launcher browser control channel returned an invalid turn release result");
-      }
-      return { cancelledByUser: body.cancelledByUser };
-    }
-    return {};
   }
+  throw new LauncherBrowserControlTransportError("Launcher browser control channel failed");
 }
 
 /**
- * Publish observational turn telemetry without coupling launcher delivery to execution.
- * Callers must intentionally ignore failures; this channel cannot decide or extend a turn.
+ * Best-effort observational telemetry. It never controls or extends a browser turn.
  */
 export async function publishLauncherTurnObservation(
   descriptorPath: string,
   helperPid: number,
   observation: TurnObservation,
-  timeoutMs = LAUNCHER_TURN_OBSERVATION_TIMEOUT_MS,
+  timeoutMs = 1_500,
 ): Promise<boolean> {
   const descriptor = readLauncherBrowserHostDescriptor(descriptorPath);
   const controller = new AbortController();
@@ -773,11 +788,7 @@ export async function publishLauncherTurnObservation(
         authorization: `Bearer ${descriptor.control.token}`,
         "content-type": "application/json",
       },
-      body: JSON.stringify({
-        traceId: observation.traceId,
-        helperPid,
-        observation,
-      }),
+      body: JSON.stringify({ traceId: observation.traceId, helperPid, observation }),
       signal: controller.signal,
     });
     if (!response.ok) return false;

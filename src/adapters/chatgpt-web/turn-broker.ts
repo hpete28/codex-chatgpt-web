@@ -704,6 +704,14 @@ export class TurnBroker implements TurnBrokerOwner {
       this.browserTokenOwners.delete(channel.continuation.browserToken);
       this.retire(this.retiredTokens, channel.continuation.browserToken, channel.traceId);
     }
+    console.info(`[chatgpt-web] broker_retired ${JSON.stringify({
+      traceId: channel.traceId,
+      pendingTools: channel.invocations.size,
+      queuedTools: channel.queuedCallIds.length,
+      deliveredTools: channel.deliveredCallIds.size,
+      activeMcpRequests: channel.activities.size,
+      completionCommitted: channel.completionCommitted,
+    })}`);
     this.channels.delete(token);
     this.pending.delete(token);
     if (channel.bindingId) {
