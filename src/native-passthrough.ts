@@ -211,9 +211,14 @@ export async function forwardNativeCodexRequest(
   endpoint: NativeCodexEndpoint,
   fetchUpstream: NativeFetch = fetchNativeCodex,
   decodedBody?: unknown,
+  mixedRootAuthorized = false,
 ): Promise<Response> {
   if (isWebOnlyCredential(request) || new URL(request.url).pathname.startsWith("/web-only/")) {
     throw new Error("Web-only provider capabilities cannot authorize native Codex passthrough");
+  }
+  if (new URL(request.url).pathname.startsWith("/mixed-root/")
+    && (endpoint === "responses" || endpoint === "responses/compact") && !mixedRootAuthorized) {
+    throw new Error("Mixed-root native passthrough requires verified Codex rollout lineage");
   }
   const authorization = request.headers.get("authorization") ?? "";
   if (!authorization.startsWith("Bearer ") || authorization.length <= "Bearer ".length) {

@@ -437,6 +437,84 @@ function validateSessionMeta(
   }
 }
 
+/** Authenticate the complete Codex spawn chain for a provider-scoped routing decision. */
+export function resolveCodexRoutingLineage(options: {
+  codexHome: string;
+  threadId: string;
+  turnId: string;
+  model: string;
+  parentThreadId?: string;
+  agentName?: string;
+}): { rootThreadId: string; depth: number } {
+  const { codexHome, threadId, turnId, model, parentThreadId, agentName } = options;
+  if (!CODEX_ID.test(threadId) || !CODEX_ID.test(turnId) || !model) {
+    throw new Error("Protected request has invalid Codex thread, turn, or model identity");
+  }
+  if (parentThreadId !== undefined && (!CODEX_ID.test(parentThreadId) || !agentName)) {
+    throw new Error("Protected descendant has incomplete Codex parent identity");
+  }
+  const seen = new Set<string>();
+  let currentId = threadId;
+  let expectedParent = parentThreadId;
+  let expectedName = agentName;
+  for (let depth = 0; depth < 16; depth += 1) {
+    if (seen.has(currentId)) throw new Error("Codex rollout spawn ancestry contains a cycle");
+    seen.add(currentId);
+    const candidates = scanCanonicalRollouts(codexHome, currentId);
+    if (candidates.length !== 1) throw new Error("Codex rollout ancestry is missing or ambiguous");
+    const path = validateRolloutPath(codexHome, candidates[0]!, currentId);
+    const fd = openSync(path, "r");
+    let meta: Record<string, unknown>;
+    try {
+      const size = fstatSync(fd).size;
+      meta = firstRolloutRecord(fd, size);
+      if (depth === 0) {
+        const latest = latestTurnContext(fd, size);
+        if (latest?.turn_id !== turnId || latest.model !== model) {
+          throw new Error("Protected request disagrees with the current Codex rollout turn");
+        }
+      }
+    } finally {
+      closeSync(fd);
+    }
+    const payload = record(meta.payload);
+    const source = record(payload?.source);
+    const spawn = record(record(source?.subagent)?.thread_spawn);
+    if (expectedParent === undefined) {
+      if (meta.type !== "session_meta" || payload?.id !== currentId
+        || payload.parent_thread_id != null || payload.thread_source === "subagent"
+        || typeof payload.source !== "string") {
+        throw new Error("Protected root is not a canonical Codex root thread");
+      }
+      return { rootThreadId: currentId, depth };
+    }
+    if (meta.type !== "session_meta" || payload?.id !== currentId
+      || payload.parent_thread_id !== expectedParent || payload.thread_source !== "subagent"
+      || spawn?.parent_thread_id !== expectedParent
+      || !matchesAgentPath(payload.agent_path, expectedName!)
+      || !matchesAgentPath(spawn.agent_path, expectedName!)) {
+      throw new Error("Protected descendant does not match its canonical Codex spawn record");
+    }
+    currentId = expectedParent;
+    expectedParent = undefined;
+    expectedName = undefined;
+    // The parent's own canonical record supplies the next edge; never trust request text.
+    const parentCandidates = scanCanonicalRollouts(codexHome, currentId);
+    if (parentCandidates.length !== 1) throw new Error("Codex parent rollout is missing or ambiguous");
+    const parentPath = validateRolloutPath(codexHome, parentCandidates[0]!, currentId);
+    const parentFd = openSync(parentPath, "r");
+    try {
+      const parentMeta = firstRolloutRecord(parentFd, fstatSync(parentFd).size);
+      const parentPayload = record(parentMeta.payload);
+      if (typeof parentPayload?.parent_thread_id === "string") {
+        expectedParent = parentPayload.parent_thread_id;
+        expectedName = typeof parentPayload.agent_path === "string" ? parentPayload.agent_path : "/root";
+      }
+    } finally { closeSync(parentFd); }
+  }
+  throw new Error("Codex rollout spawn ancestry exceeds the supported depth");
+}
+
 function absolutePaths(value: unknown, field: string): string[] {
   if (!Array.isArray(value) || value.some(path => typeof path !== "string" || !isAbsolute(path))) {
     throw new Error(`Codex rollout ${field} is invalid`);

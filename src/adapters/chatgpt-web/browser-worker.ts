@@ -2734,13 +2734,22 @@ export class ChatGptBrowserWorker {
     let count = 0;
     while (Date.now() < deadline) {
       throwIfPromptAttachmentAborted(abortSignal);
-      count = await withBrowserTurnAbort(
-        withChatGptBrowserObservationTimeout(
-          composers.count(),
-          Math.max(1, Math.min(CHATGPT_BROWSER_OBSERVATION_PROBE_TIMEOUT_MS, deadline - Date.now())),
-        ),
-        abortSignal,
-      );
+      try {
+        count = await withBrowserTurnAbort(
+          withChatGptBrowserObservationTimeout(
+            composers.count(),
+            Math.max(1, Math.min(CHATGPT_BROWSER_OBSERVATION_PROBE_TIMEOUT_MS, deadline - Date.now())),
+          ),
+          abortSignal,
+        );
+      } catch (error) {
+        // A newly navigated Temporary Chat can finish hydrating after a single slow DOM probe.
+        // Retain the overall deadline; do not translate a transient observation stall into a
+        // false expired-login diagnosis or swallow an actual browser/turn abort.
+        if (!(error instanceof ChatGptBrowserObservationTimeoutError)) throw error;
+        await withBrowserTurnAbort(new Promise(resolveSleep => setTimeout(resolveSleep, 250)), abortSignal);
+        continue;
+      }
       if (count === 1) return composers.first();
       await withBrowserTurnAbort(
         new Promise(resolveSleep => setTimeout(resolveSleep, 50)),
@@ -2769,12 +2778,9 @@ export class ChatGptBrowserWorker {
       });
       await captureDiagnostic?.("temporary-chat-navigation-complete");
     }
-    let composer: Locator;
-    try {
-      composer = await this.activeComposer(page);
-    } catch {
-      throw new Error("ChatGPT web login is expired or the Temporary Chat surface is unavailable");
-    }
+    // An unavailable composer is not evidence of an expired login. Preserve the
+    // original observation/page failure so a hydration or binding problem can be diagnosed.
+    const composer = await this.activeComposer(page);
     if (await dismissChatGptTemporaryChatOnboarding(page)) {
       await captureDiagnostic?.("temporary-chat-onboarding-dismissed");
     }

@@ -4,6 +4,7 @@ import { closeTurnBrokers, TurnBroker } from "./adapters/chatgpt-web/turn-broker
 import { timingSafeEqual } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { webOnlyRequestPolicy, webOnlyModelRejection } from "./web-only-subagents";
+import { mixedRootRequestPolicy } from "./mixed-root-routing";
 import { chatGptTurnSessions } from "./adapters/chatgpt-web/turn-execution";
 import {
   cancelAllStructuredCompactions,
@@ -363,6 +364,10 @@ export interface ResponseRequestOptions {
   onAdapterEvent?: (event: AdapterEvent) => void;
   /** Bind the physical HTTP stream to the exact native Codex turn that owns it. */
   onTurnIdentity?: (identity: NativeCodexTurnIdentity) => void;
+  /** Isolated HTTP validation can replace native upstream without contacting production. */
+  fetchUpstream?: NativeFetch;
+  /** Granted only after startServer verified the canonical mixed-root rollout. */
+  mixedRootAuthorized?: boolean;
 }
 
 export function routeChatGptWebRequest(parsed: CodexParsedRequest, config: AppConfig): ChatGptWebModelRoute {
@@ -499,7 +504,7 @@ export async function responseRequest(
   }
   if (typeof requestedModel === "string" && !isChatGptWebModelSlug(requestedModel)) {
     try {
-      return await forwardNativeCodexRequest(nativeRequest, "responses", undefined, raw);
+      return await forwardNativeCodexRequest(nativeRequest, "responses", options.fetchUpstream, raw, options.mixedRootAuthorized);
     } catch (error) {
       return formatErrorResponse(502, "upstream_error", error instanceof Error ? error.message : String(error));
     }
@@ -680,7 +685,7 @@ export async function compactRequest(
   req: Request,
   config: AppConfig,
   adapterFactory: ChatGptWebAdapterFactory = createChatGptWebAdapter,
-  options: Pick<ResponseRequestOptions, "onTurnIdentity"> = {},
+  options: Pick<ResponseRequestOptions, "onTurnIdentity" | "fetchUpstream" | "mixedRootAuthorized"> = {},
 ): Promise<Response> {
   const nativeRequest = req.clone();
   let raw: Record<string, unknown>;
@@ -726,7 +731,7 @@ export async function compactRequest(
   }
   if (!isChatGptWebModelSlug(raw.model)) {
     try {
-      return await forwardNativeCodexRequest(nativeRequest, "responses/compact", undefined, raw);
+      return await forwardNativeCodexRequest(nativeRequest, "responses/compact", options.fetchUpstream, raw, options.mixedRootAuthorized);
     } catch (error) {
       return formatErrorResponse(502, "upstream_error", error instanceof Error ? error.message : String(error));
     }
@@ -838,9 +843,18 @@ export function startServer(
       const url = new URL(req.url);
       const policy = webOnlyRequestPolicy(req, config);
       if (policy.rejection) return policy.rejection;
+      const mixedRoot = await mixedRootRequestPolicy(req, config);
+      if (mixedRoot.rejection) return mixedRoot.rejection;
+      const routedReq = mixedRoot.body ? (() => {
+        const headers = new Headers(req.headers);
+        headers.delete("content-encoding");
+        headers.delete("content-length");
+        return new Request(req.url, { method: req.method, headers, body: JSON.stringify(mixedRoot.body), signal: req.signal });
+      })() : req;
       if (policy.protected && url.pathname.startsWith("/web-only/")) {
         url.pathname = url.pathname.slice("/web-only".length);
       }
+      if (mixedRoot.protected) url.pathname = url.pathname.slice("/mixed-root".length);
       if (policy.protected && req.method === "GET" && url.pathname === "/v1/models") {
         try {
           // Never send the local provider capability to OpenAI. Reuse the local native template.
@@ -1042,7 +1056,7 @@ export function startServer(
           }
           let failure: ModelCatalogFailure | undefined;
           const response = await modelsRequest(
-            new Request(req, { signal }),
+            new Request(routedReq, { signal }),
             catalogConfig,
             dependencies.fetchUpstream,
             readCodexModelContextOverride,
@@ -1065,10 +1079,10 @@ export function startServer(
         if (draining) return formatErrorResponse(503, "server_error", "codex-chatgpt-web is draining for a requested service operation");
         return httpTurns.track(
           (signal, bindIdentity) => responseRequest(
-            new Request(req, { signal }),
+            new Request(routedReq, { signal }),
             config,
             dependencies.adapterFactory,
-            { onTurnIdentity: bindIdentity },
+            { onTurnIdentity: bindIdentity, fetchUpstream: dependencies.fetchUpstream, mixedRootAuthorized: mixedRoot.protected },
           ),
           req.signal,
           process.platform,
@@ -1079,10 +1093,10 @@ export function startServer(
         if (draining) return formatErrorResponse(503, "server_error", "codex-chatgpt-web is draining for a requested service operation");
         return httpTurns.track(
           (signal, bindIdentity) => compactRequest(
-            new Request(req, { signal }),
+            new Request(routedReq, { signal }),
             config,
             dependencies.adapterFactory,
-            { onTurnIdentity: bindIdentity },
+            { onTurnIdentity: bindIdentity, fetchUpstream: dependencies.fetchUpstream, mixedRootAuthorized: mixedRoot.protected },
           ),
           req.signal,
           process.platform,

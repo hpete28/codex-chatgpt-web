@@ -1270,6 +1270,35 @@ test("active composer resolution waits for exactly one visible editor", async ()
   expect(await activeComposer.call({}, page, 500)).toBe(composer);
 });
 
+test("active composer tolerates a transient slow DOM probe while preserving its deadline", async () => {
+  const composer = { id: "ready-after-hydration" };
+  let probes = 0;
+  const visibleComposers = {
+    count: async () => {
+      probes++;
+      if (probes === 1) throw new ChatGptBrowserObservationTimeoutError(5_000);
+      return 1;
+    },
+    first: () => composer,
+  };
+  const page = { locator: () => ({ filter: () => visibleComposers }) };
+  const activeComposer = (ChatGptBrowserWorker.prototype as unknown as {
+    activeComposer(page: unknown, timeoutMs?: number): Promise<unknown>;
+  }).activeComposer;
+  expect(await activeComposer.call({}, page, 1_000)).toBe(composer);
+  expect(probes).toBe(2);
+});
+
+test("Temporary Chat preparation preserves composer observation failures without misdiagnosing login", async () => {
+  const observationError = new Error("Execution context was destroyed during navigation");
+  const prepare = (ChatGptBrowserWorker.prototype as unknown as {
+    prepareTemporaryChatSurface(page: unknown): Promise<unknown>;
+  }).prepareTemporaryChatSurface;
+  const page = { url: () => "https://chatgpt.com/?temporary-chat=true" };
+  await expect(prepare.call({ activeComposer: async () => { throw observationError; } }, page))
+    .rejects.toBe(observationError);
+});
+
 test("prompt verification accepts Lexical NBSP preservation without weakening other mismatches", async () => {
   // Lexical may preserve indentation as alternating NBSP and ASCII spaces while keeping the same
   // UTF-16 length; that representation is equivalent only for whitespace runs.
