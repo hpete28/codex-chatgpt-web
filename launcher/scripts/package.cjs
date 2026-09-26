@@ -129,6 +129,16 @@ try {
   if (result.error) throw result.error;
   if (result.status !== 0) process.exit(result.status ?? 1);
   if (target === "--mac") verifySignedMacArchive();
+  if (target === "--win") {
+    // electron-builder's default resource globs exclude files such as LICENSES and
+    // dependency fixtures that are nevertheless declared in our checksummed runtime.
+    // Verify the actual package payload, not only the source staging tree.
+    validateRuntimeBundle(path.join(staging, "win-unpacked", "resources", "runtime"), {
+      version: launcherManifest.version,
+      platform: "win32",
+      arch: process.arch,
+    });
+  }
 
   fs.mkdirSync(artifactsDirectory, { recursive: true });
   for (const entry of fs.readdirSync(artifactsDirectory, { withFileTypes: true })) {

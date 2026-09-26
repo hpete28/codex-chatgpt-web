@@ -42,6 +42,11 @@ test("launcher publishes native packages for all supported desktop operating sys
     manifest.build.extraResources.find((entry) => entry.to === "build-info.json"),
     { from: "build/build-info.json", to: "build-info.json" },
   );
+  assert.deepEqual(
+    manifest.build.extraResources.find((entry) => entry.to === "runtime"),
+    { from: "build/runtime", to: "runtime", filter: ["**/*"] },
+    "packaged runtime must retain all manifest-declared assets, including LICENSES and dependency fixtures",
+  );
   assert.ok(manifest.build.asarUnpack.includes("assets/linux-appimage-runner.sh"));
   assert.equal(manifest.build.afterPack, undefined);
   assert.ok(fs.existsSync(path.join(launcherRoot, "assets", "icon.ico")));
@@ -66,6 +71,7 @@ test("custom packages bind launcher and runtime provenance to one clean revision
   assert.match(identity, /sameBuildInfo\(buildInfo, runtimeBuild\)/);
   assert.match(packager, /sameBuildInfo\(sourceBuild, launcherBuild\)/);
   assert.match(packager, /sameBuildInfo\(sourceBuild, runtimeBuild\)/);
+  assert.match(packager, /validateRuntimeBundle\(path\.join\(staging, "win-unpacked", "resources", "runtime"\)/);
   assert.match(smoke, /app\/build-info\.json/);
   assert.match(smoke, /sameBuildInfo\(marker\.launcherBuild, marker\.runtimeBuild\)/);
 });

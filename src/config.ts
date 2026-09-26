@@ -69,6 +69,8 @@ export interface AppConfig {
   releaseVersion: string;
   mode: RuntimeMode;
   subagentProtocol: SubagentProtocol;
+  /** Opt-in managed Codex route: native root and authenticated Web descendants share /mixed-root/v1. */
+  mixedRootRouting?: boolean;
   /** Opt-in capability for a separate Web-only provider; ordinary native/mixed tasks are unchanged. */
   webOnlySubagents?: WebOnlySubagents;
   host: "127.0.0.1";
@@ -387,6 +389,12 @@ function parseConfig(value: unknown, path: string): AppConfig {
   validateWebOnlySubagents(parsed.webOnlySubagents);
   if (subagentProtocol !== "compatibility-v1" && subagentProtocol !== "native") {
     throw new Error(`Invalid subagentProtocol in ${path}`);
+  }
+  if (parsed.mixedRootRouting !== undefined && typeof parsed.mixedRootRouting !== "boolean") {
+    throw new Error(`Invalid mixedRootRouting in ${path}`);
+  }
+  if (parsed.mixedRootRouting === true && (parsed.mode !== "full" || subagentProtocol !== "compatibility-v1")) {
+    throw new Error(`Mixed-root routing requires full mode and Compatibility V1 in ${path}`);
   }
   if (parsed.host !== "127.0.0.1") throw new Error("The Responses proxy must bind to 127.0.0.1");
   if (parsed.browserHost !== "managed-chrome" && parsed.browserHost !== "launcher") {

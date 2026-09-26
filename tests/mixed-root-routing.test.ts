@@ -3,8 +3,16 @@ import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "n
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { defaultConfig } from "../src/config";
+import { routeUrl } from "../src/codex-integration-shared";
 import { startServer } from "../src/server";
 import { forwardNativeCodexRequest } from "../src/native-passthrough";
+
+test("managed Codex route opts into mixed-root without changing ordinary integrations", () => {
+  const config = defaultConfig("full");
+  expect(routeUrl(config)).toBe("http://127.0.0.1:17841/v1");
+  config.mixedRootRouting = true;
+  expect(routeUrl(config)).toBe("http://127.0.0.1:17841/mixed-root/v1");
+});
 
 const rootId = "11111111-1111-4111-8111-111111111111";
 const childId = "22222222-2222-4222-8222-222222222222";

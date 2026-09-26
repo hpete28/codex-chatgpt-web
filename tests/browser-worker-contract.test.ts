@@ -1400,8 +1400,8 @@ test("active composer tolerates a transient slow DOM probe while preserving its 
 test("Temporary Chat preparation preserves composer observation failures without misdiagnosing login", async () => {
   const observationError = new Error("Execution context was destroyed during navigation");
   const prepare = (ChatGptBrowserWorker.prototype as unknown as {
-    prepareTemporaryChatSurface(page: unknown): Promise<unknown>;
-  }).prepareTemporaryChatSurface;
+    prepareChatSurface(page: unknown): Promise<unknown>;
+  }).prepareChatSurface;
   const page = { url: () => "https://chatgpt.com/?temporary-chat=true" };
   await expect(prepare.call({ activeComposer: async () => { throw observationError; } }, page))
     .rejects.toBe(observationError);

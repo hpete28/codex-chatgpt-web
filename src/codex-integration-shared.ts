@@ -264,7 +264,8 @@ export function getCodexJournalRecoveryPath(): string {
 }
 
 export function routeUrl(config: AppConfig): string {
-  return `http://${config.host}:${config.port}/v1`;
+  const path = config.mixedRootRouting === true ? "/mixed-root/v1" : "/v1";
+  return `http://${config.host}:${config.port}${path}`;
 }
 
 export function sha256(value: string | Uint8Array): string {

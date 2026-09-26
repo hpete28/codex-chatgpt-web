@@ -12,7 +12,11 @@ import { fetchNativeCodex } from '../src/native-network';
 
 const testDir = mkdtempSync(join(tmpdir(), 'dev-mixed-live-'));
 const nativeRoot = process.argv.slice(2).includes('--native-root');
-if (process.argv.slice(2).some(arg => arg !== '--native-root')) throw new Error('Unknown live smoke option');
+const automaticChild = process.argv.slice(2).includes('--automatic-child');
+if (process.argv.slice(2).some(arg => !['--native-root', '--automatic-child'].includes(arg))) {
+  throw new Error('Unknown live smoke option');
+}
+if (automaticChild && !nativeRoot) throw new Error('Automatic-child smoke requires a native root');
 const normalizedMarker = (value: unknown): string => typeof value === 'string'
   // The child result appears both as plain Markdown and as JSON-escaped text in
   // wait_agent output. Decode either representation before checking the marker.
@@ -82,19 +86,25 @@ try {
   await TurnBroker.forSocket(cfg.brokerSocketPath).listen(); // Same DEV socket selected by Codex Native2 DEV.
   const models = join(testDir, 'models.json');
   writeFileSync(models, JSON.stringify(augmentNativeModelCatalog(bundledCatalog, cfg)));
+  const webChildModel = 'chatgpt-web/gpt-5.6-sol';
   writeFileSync(join(home, 'config.toml'), [
     `model = ${JSON.stringify(nativeRoot ? nativeRootModel : 'chatgpt-web/high')}`, 'model_provider = "proof"', `model_catalog_json = ${JSON.stringify(models)}`,
     '[model_providers.proof]', 'name = "DEV mixed-root live probe"',
     `base_url = "http://127.0.0.1:${server.port}/mixed-root/v1"`,
     'env_key = "PROOF_KEY"', 'wire_api = "responses"', 'supports_websockets = false',
-    '[agents]', 'max_depth = 2', '[features]', 'multi_agent = true', 'multi_agent_v2 = false',
+    '[agents]', 'max_depth = 2',
+    ...(automaticChild ? [`default_subagent_model = ${JSON.stringify(webChildModel)}`] : []),
+    '[features]', 'multi_agent = true', 'multi_agent_v2 = false',
   ].join('\n'));
   const env: Record<string, string> = {
     PATH: process.env.PATH ?? '', SystemRoot: process.env.SystemRoot ?? '', WINDIR: process.env.WINDIR ?? '',
     TEMP: testDir, TMP: testDir, USERPROFILE: testDir, CODEX_HOME: home,
     PROOF_KEY: 'isolated-local-test',
   };
-  const prompt = 'This is one isolated delegation smoke test. You MUST use the native Compatibility V1 spawn_agent tool to create exactly one subagent with model chatgpt-web/high. Ask it to reply exactly CHILD_DEV_LIVE_OK. Use wait_agent to obtain its result. After the child result arrives, reply exactly PARENT_RECEIVED_CHILD_DEV_LIVE_OK. Do not create further agents. Do not use shell commands, modify files, or access external services unrelated to this task.';
+  const childSelection = automaticChild
+    ? 'Create exactly one subagent using the configured default subagent model. Do not specify a model in the spawn tool arguments.'
+    : `Create exactly one subagent with model ${webChildModel}.`;
+  const prompt = `This is one isolated delegation smoke test. You MUST use the native Compatibility V1 spawn_agent tool. ${childSelection} Ask it to reply exactly CHILD_DEV_LIVE_OK. Use wait_agent to obtain its result. After the child result arrives, reply exactly PARENT_RECEIVED_CHILD_DEV_LIVE_OK. Do not create further agents. Do not use shell commands, modify files, or access external services unrelated to this task.`;
   const proc = Bun.spawn([exe, 'exec', '--json', '--skip-git-repo-check', '--sandbox', 'read-only', prompt],
     { cwd: testDir, env, stdin: 'ignore', stdout: 'pipe', stderr: 'pipe' });
   const timer = setTimeout(() => proc.kill(), 300_000);
@@ -112,9 +122,16 @@ try {
     const completion = lines.find(x => x.type === 'event_msg' && x.payload?.type === 'task_complete')?.payload;
     return { id: metadata.id ?? null, parent, provider: metadata.model_provider ?? null,
       models: lines.filter(x => x.type === 'turn_context').map(x => x.payload?.model),
-      spawnCalled: items.some(x => x.type === 'function_call' && x.name === 'spawn_agent'),
-      waitCalled: items.some(x => x.type === 'function_call' && x.name === 'wait_agent'),
-      waitReceivedChild: items.some(x => x.type === 'function_call_output' && normalizedMarker(x.output).includes('CHILD_DEV_LIVE_OK')),
+      // Recent stock Code Mode dispatches multi_agent_v1 through exec; older runtimes log
+      // ordinary function_call items. Both are first-party rollout evidence.
+      spawnCalled: items.some(x => (x.type === 'function_call' && x.name === 'spawn_agent')
+        || (x.type === 'custom_tool_call' && x.name === 'exec'
+          && typeof x.input === 'string' && x.input.includes('multi_agent_v1__spawn_agent('))),
+      waitCalled: items.some(x => (x.type === 'function_call' && x.name === 'wait_agent')
+        || (x.type === 'custom_tool_call' && x.name === 'exec'
+          && typeof x.input === 'string' && x.input.includes('multi_agent_v1__wait_agent('))),
+      waitReceivedChild: items.some(x => (x.type === 'function_call_output' || x.type === 'custom_tool_call_output')
+        && normalizedMarker(typeof x.output === 'string' ? x.output : JSON.stringify(x.output)).includes('CHILD_DEV_LIVE_OK')),
       completed: Boolean(completion && !completion.error),
       childResult: normalizedMarker(completion?.last_agent_message) === 'CHILD_DEV_LIVE_OK',
       parentResult: normalizedMarker(completion?.last_agent_message) === 'PARENT_RECEIVED_CHILD_DEV_LIVE_OK' };
@@ -125,9 +142,9 @@ try {
     && (nativeRoot ? authorizedNativeRootForward > 0 && nativeUpstreamStatuses.every(status => status >= 200 && status < 300) : authorizedNativeRootForward === 0)
     && root?.provider === 'proof' && root.models.includes(nativeRoot ? nativeRootModel : 'chatgpt-web/high') && root.spawnCalled
     && root.waitCalled && root.waitReceivedChild && root.completed && root.parentResult
-    && child?.provider === 'proof' && child.models.includes('chatgpt-web/high')
+    && child?.provider === 'proof' && child.models.includes(webChildModel)
     && child.completed && child.childResult;
-  const evidence = { testDir, codexVersion, nativeRootModel, nativeRoot, exit, sessionCount: sessions.length, sessions,
+  const evidence = { testDir, codexVersion, nativeRootModel, nativeRoot, automaticChild, exit, sessionCount: sessions.length, sessions,
     nativeRootForwarded: authorizedNativeRootForward, nativeUpstreamStatuses, unintendedNativeForwarded: unexpectedNativeForward,
     passed,
     errorTypes: stdout.split('\n').filter(x => x.includes('"type":"error"')).map(x => { try { return JSON.parse(x).msg?.split(':')[0] ?? 'codex_error'; } catch { return 'codex_error'; } }).slice(-3),

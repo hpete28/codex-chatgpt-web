@@ -50,7 +50,7 @@ export function webOnlyModelRejection(req: Request, config: AppConfig, model: un
   const policy = webOnlyRequestPolicy(req, config);
   if (policy.rejection) return policy.rejection;
   if (!policy.protected) return;
-  if (!availableChatGptWebModelRoutes(config).some(route => route.slug === model)) {
+  if (!availableChatGptWebModelRoutes(config, true).some(route => route.slug === model)) {
     // Codex treats 400 as terminal; 403 is retried by some installed clients.
     const label = typeof model === "string" ? JSON.stringify(model.slice(0, 128)) : "<missing or invalid>";
     return error(400, `Web-only provider rejected model ${label} before execution. Select an available chatgpt-web/* model; native fallback is forbidden.`);
@@ -67,7 +67,7 @@ export function webOnlySpawnHook(payload: unknown, config: AppConfig): Record<st
   if (event.hook_event_name !== "PreToolUse") return deny("expected PreToolUse");
   if (!config.webOnlySubagents) return deny("policy is disabled; remove the optional hook or enable the provider before starting a fresh task");
   // Install this hook only in the dedicated provider profile. Never use caller-supplied parent IDs.
-  const approved = availableChatGptWebModelRoutes(config).map(route => route.slug);
+  const approved = availableChatGptWebModelRoutes(config, true).map(route => route.slug);
   if (!approved.includes(event.model as string)) return deny("the protected task must run an approved Web model");
   if (event.tool_name !== "spawn_agent" && event.tool_name !== "Agent") return {};
   const args = event.tool_input;
