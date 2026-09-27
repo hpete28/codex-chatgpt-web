@@ -1,5 +1,22 @@
 # Stock Codex Mixed-Root Production Cutover
 
+## SEPTEMBER 26 PRODUCTION CUTOVER — COMPLETED (CURRENT AUTHORITY)
+
+The stock-Codex cutover was completed and verified after the historical sections below were written. Do not repeat the earlier deployment or remove rollback assets merely because older phases below are phrased as pending.
+
+- Installed Codex Web GPT: **6.1.0**, clean source/build revision `55f430876beee47319df703b4d377efe4d7d29f9`. Corrected Windows package is installed and the runtime is materialized.
+- Current managed route: `http://127.0.0.1:17841/mixed-root/v1`; `mixedRootRouting=true`. Route journal inspection reports installed, active and no errors. The bridge health check reports `status=ok`, version 6.1.0, and `accepting_turns=true`.
+- Global `~\.codex\config.toml`: root `model="gpt-6-sol"`; official `[agents] default_subagent_model="chatgpt-web/gpt-5.6-sol"`. The alpha9.2-only `web_only_subagent_models` entry was removed. Other unrelated settings were retained.
+- USER-level `CODEX_CLI_PATH` was removed and verified absent. The official desktop was fully restarted; its actual app-server runs `C:\Users\Peter\AppData\Local\OpenAI\Codex\bin\d23520d1e41bfb24\codex.exe`, version `codex-cli 0.158.0-alpha.2`, under OpenAI desktop package `26.924.1866.0`. The stock Code Mode companion exists. No alpha9.2 app-server remains.
+- Real installed-production Web turn **PASS**: `%TEMP%\stock-prod-web-probe-20260926213706\stdout-closed-stdin.jsonl`. A stock Codex Web-root request completed with the requested marker; Markdown-escaped underscores explain the old literal checker mismatch.
+- Real production stock-native-root -> automatically selected Web-child delegation **PASS**: root thread `01a0e088-567d-7601-a2ff-a3b59c64b8c3`, child thread `01a0e088-a8d9-7912-b0cc-49e2f11db7b5`. Canonical rollouts show native `gpt-6-sol` root, one `chatgpt-web/gpt-5.6-sol` child, successful spawn, successful `wait_agent` returning the parsed completed child marker, and both sessions completed. Parent emitted its completion marker. Evidence is saved privately in the rollback checkpoint.
+- Known non-blocking transport caveat: stock 0.158 first attempted WebSocket at the HTTP-only mixed-root endpoint, received 403 retries, then fell back to HTTPS/HTTP successfully. The real delegation completed. Consider a separate narrow transport-compatibility improvement only if this causes repeated user-facing delay; do not weaken lineage checks or disable TLS.
+- The old Windows scheduled task `Codex Custom Update Watch` was **disabled, not deleted**, after stock acceptance; its XML was exported as rollback.
+- Private rollback checkpoint: `C:\Users\Peter\AppData\Local\CodexMixedRootRollback\20260926-214120` contains pre-cutover config, model cache, integration journal/recovery, bridge config, prior override and scheduled-task XML. The old custom executable remains at `C:\CodexBuilds\web-only-alpha9.2\debug\codex.exe`. Prior bridge runtimes are retained.
+- The test verifies root/child inference and parent continuation. A fresh post-restart iPhone remote UI turn and production connector tool-call attachment were not separately exercised; check these only if the user encounters a problem.
+
+The installed application remains built from source revision `55f4308`; any subsequent documentation-only commit does not imply the application was rebuilt.
+
 ## Goal
 
 Finish and deploy the mixed-root architecture so the official OpenAI Codex desktop/backend can stay stock and receive normal OpenAI updates, while `codex-chatgpt-web` handles protected ChatGPT Web descendant routing externally.
@@ -65,9 +82,9 @@ Last verified package version:
 
 Important: `7582553` is a minimum known-good baseline, not a commit to reset to. If newer commits exist, inspect and preserve them.
 
-## SEPTEMBER 26 VERIFIED UPDATE - HIGHEST PRIORITY RESUME STATE
+## SEPTEMBER 26 HISTORICAL PRE-CUTOVER UPDATE (SUPERSEDED)
 
-This section supersedes previous readiness/version assumptions. Inspect the live machine before every cutover decision.
+This section records the earlier readiness and testing evidence. The production completion section at the top is authoritative. Inspect the live machine before any future deployment decision.
 
 - Official OpenAI desktop updated to `OpenAI.Codex 26.924.1866.0`. Its managed executable is now `C:\Users\Peter\AppData\Local\OpenAI\Codex\bin\d23520d1e41bfb24\codex.exe`, version `codex-cli 0.158.0-alpha.2`. The former `13995fba...` path no longer exists. Do not pin production to either changing versioned path; verify actual process after restart.
 - The USER-level `CODEX_CLI_PATH` and live desktop app-server still point to `C:\CodexBuilds\web-only-alpha9.2\debug\codex.exe`. Do not remove it until accepted production gates pass.
@@ -81,7 +98,7 @@ This section supersedes previous readiness/version assumptions. Inspect the live
 - Stock 0.158 currently rejects the live global `~\.codex\config.toml` before thread start: `invalid length 1, expected struct AgentRoleToml with 3 elements in agents`. The old custom `[agents] web_only_subagent_models = ["chatgpt-web/high"]` must be retired with a backed-up migration; do not replace or delete unrelated settings. Set root `model = "gpt-6-sol"`, official `[agents] default_subagent_model = "chatgpt-web/gpt-5.6-sol"`, and managed route `/mixed-root/v1` only after the fresh bridge candidate is deployed and healthy. Preserve alpha9.2/config as rollback. Avoid copying `auth.json` to a project/test directory; the isolated DEV smoke already handles existing native auth in memory.
 - The current source changes and this execution plan are not yet committed. Release packaging enforces clean committed build identity. Update this plan, explicitly commit the intended files, check `git status --porcelain` empty, then build the production installer. The old 5.0.8 bundle and repaired 6.1.0 runtime must remain recoverable until acceptance.
 
-**Current remaining sequence:** preserve healthy production 6.1.0; complete focused source and package gates; commit updated plan and source changes; build a clean Windows NSIS installer and verify its actual unpacked/installed runtime before overwriting working install; controlled reinstall with rollback; verify one real production Web turn; migrate managed route and global Codex config with snapshot (removing stock-incompatible custom `web_only_subagent_models`); fully exit/relaunch desktop after removing USER `CODEX_CLI_PATH`; confirm actual stock backend and official default Web child in one production delegation; retain rollback until acceptance. No additional expensive DEV delegation smoke is needed unless source behavior changes or a gate fails.
+**Historical planned sequence:** This cutover sequence was subsequently executed. Refer to the production completion section above rather than rerunning it.
 
 ## RECOVERED CURRENT STATE - THIS OVERRIDES OLDER ASSUMPTIONS BELOW
 
