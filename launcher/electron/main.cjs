@@ -30,6 +30,8 @@ const {
   registerLoggedIpc,
 } = require("./logging.cjs");
 const { RuntimeHost } = require("./runtime.cjs");
+const { readBuildInfoFile } = require("./build-info.cjs");
+const { buildDiagnosticReport, saveDiagnosticReport } = require("./diagnostic-report.cjs");
 const { ensurePackagedRuntime, waitForPackagedRuntimeSource } = require("./runtime-install.cjs");
 const { RuntimeSupervisor } = require("./runtime-supervisor.cjs");
 const { DEVELOPMENT_PROFILE, resolveLauncherProfile } = require("./profile.cjs");
@@ -46,6 +48,7 @@ const {
   trackWindowState,
 } = require("./window-state.cjs");
 
+let lastDoctorCache = null;
 const isDev = Boolean(process.env.VITE_DEV_SERVER_URL);
 const SOURCE_ROOT = path.resolve(__dirname, "../..");
 const LAUNCHER_PROFILE = resolveLauncherProfile({ appData: app.getPath("appData") });
@@ -215,8 +218,8 @@ function trayImage() {
   if (process.platform !== "darwin") {
     return nativeImage.createFromPath(APP_ICON_PATH).resize({ width: 18, height: 18 });
   }
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 18 18"><path d="M4.1 3.4h6.4l3.4 3.4v7.8H7.5l-3.4-3.4V3.4Z" fill="none" stroke="white" stroke-width="1.5" stroke-linejoin="round"/><path d="m7 7 2-2 2 2M7 11l2 2 2-2" fill="none" stroke="white" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
-  const image = nativeImage.createFromDataURL(`data:image/svg+xml;base64,${Buffer.from(svg).toString("base64")}`);
+  const image = nativeImage.createFromPath(path.join(__dirname, "..", "assets", "trayTemplate.png"));
+  if (image.isEmpty()) throw new Error("The macOS menu-bar icon is missing or invalid");
   image.setTemplateImage(true);
   return image;
 }
@@ -514,6 +517,23 @@ function syncFreshConversationPreference(stateStore, config) {
   return state;
 }
 
+function diagnosticBuildSnapshot() {
+  const resources = app.isPackaged ? process.resourcesPath : path.join(SOURCE_ROOT, "launcher", "build");
+  const runtimeRoot = path.join(resources, "runtime");
+  let runtimeBundleId = null;
+  try {
+    const manifest = JSON.parse(fs.readFileSync(path.join(runtimeRoot, "manifest.json"), "utf8"));
+    if (typeof manifest.bundleId === "string" && /^[a-f0-9]{64}$/.test(manifest.bundleId)) {
+      runtimeBundleId = manifest.bundleId;
+    }
+  } catch {}
+  return {
+    launcherBuild: readBuildInfoFile(path.join(resources, "build-info.json")),
+    runtimeBuild: readBuildInfoFile(path.join(runtimeRoot, "app", "build-info.json")),
+    runtimeBundleId,
+  };
+}
+
 function registerIpc({ logger, stateStore }) {
   const handle = (channel, handler) => registerLoggedIpc(ipcMain, logger, channel, handler);
   handle("launcher:limits", () => limitsController.snapshot());
@@ -530,10 +550,12 @@ function registerIpc({ logger, stateStore }) {
     },
     state: syncFreshConversationPreference(stateStore, runtimeHost.runtimeConfigSnapshot().config),
     browser: browserHost?.snapshot() ?? null,
+    turnObservations: browserHost?.turnObservations?.() ?? [],
+    ...diagnosticBuildSnapshot(),
     connectorName: runtimeHost.browserConnectorName(),
     connectorNames: {
       automatic: runtimeHost.setupConnectorName(),
-      manual: "Codex Zero Risk",
+      manual: runtimeHost.setupConnectorName("manual"),
     },
     mcpCredentialsConfigured: runtimeHost?.mcpCredentialsConfigured() ?? false,
     logs: logger.recent(),
@@ -721,7 +743,11 @@ function registerIpc({ logger, stateStore }) {
     }
   });
 
-  handle("launcher:doctor", () => IS_DEV_PROFILE ? runtimeHost.devDoctor() : runtimeHost.doctor());
+  handle("launcher:doctor", async () => {
+    const report = IS_DEV_PROFILE ? await runtimeHost.devDoctor() : await runtimeHost.doctor();
+    lastDoctorCache = { observedAt: new Date().toISOString(), report };
+    return report;
+  });
   handle("launcher:cancel-turns", () => {
     if (IS_DEV_PROFILE) throw new Error("DEV chat turns are owned by the repository CLI process");
     return runtimeHost.cancelActiveTurns();
@@ -848,6 +874,20 @@ function registerIpc({ logger, stateStore }) {
     if (!IS_DEV_PROFILE) startCatalogVerificationMonitor({ logger, stateStore });
     return { ok: true, stdout: result.stdout };
   });
+  handle("launcher:connector-name", async (_event, suffix) => {
+    if (browserHost.activeTraceId || browserHost.currentOperation()) {
+      throw new Error("Finish active ChatGPT turns before changing the plugin name");
+    }
+    const result = await runtimeHost.setConnectorNameSuffix(suffix);
+    if (!result.changed) return stateStore.read();
+    const state = stateStore.update({ mcpSetupComplete: false, mcpGuideStep: 2 });
+    send("launcher:connector-names-changed", {
+      connectorName: runtimeHost.browserConnectorName(),
+      connectorNames: { automatic: runtimeHost.setupConnectorName(), manual: runtimeHost.setupConnectorName("manual") },
+    });
+    send("launcher:state-changed", state);
+    return state;
+  });
   handle("launcher:set-mcp-step", (_event, step) => {
     if (!Number.isInteger(step) || step < 0 || step > 2) throw new Error("Invalid MCP guide step");
     return stateStore.update({ mcpGuideStep: step });
@@ -972,6 +1012,44 @@ function registerIpc({ logger, stateStore }) {
       destinationPath: result.filePath,
     });
     logger.info("launcher.logs_exported", { recordCount });
+    return result.filePath;
+  });
+  handle("launcher:export-diagnostic-report", async (_event, input) => {
+    const traceId = input?.traceId;
+    if (traceId !== null && traceId !== undefined
+      && (typeof traceId !== "string" || traceId.length > 128)) {
+      throw new Error("Invalid diagnostic trace selection");
+    }
+    const state = stateStore.read();
+    const config = runtimeHost.runtimeConfigSnapshot().config;
+    const report = buildDiagnosticReport({
+      profile: LAUNCHER_PROFILE.kind,
+      appVersion: app.getVersion(),
+      ...diagnosticBuildSnapshot(),
+      mode: config?.mode,
+      interactionMode: state.browserInteractionMode,
+      doctorCache: lastDoctorCache,
+      turnObservation: typeof traceId === "string" ? browserHost?.turnObservation(traceId) : null,
+    });
+    const result = await dialog.showSaveDialog(mainWindow, {
+      title: nativeCopyFor(state.language).exportDiagnostics,
+      defaultPath: path.join(app.getPath("documents"), `codex-web-gpt-report-${new Date().toISOString().slice(0, 10)}.json`),
+      filters: [{ name: "JSON", extensions: ["json"] }],
+    });
+    if (result.canceled || !result.filePath) return null;
+    saveDiagnosticReport({
+      destinationPath: result.filePath,
+      report,
+      protectedPaths: [
+        path.join(CORE_HOME, "config.json"),
+        path.join(CORE_HOME, "codex", "integration-journal.json"),
+        path.join(LAUNCHER_PROFILE.codexHome, "config.toml"),
+        path.join(launcherUserData, "launcher-state.json"),
+        logger.filePath,
+        BROWSER_DESCRIPTOR_PATH,
+      ],
+    });
+    logger.info("launcher.diagnostic_report_exported");
     return result.filePath;
   });
   handle("launcher:update-install", async () => {
@@ -1160,6 +1238,7 @@ async function start() {
     partition: LAUNCHER_PROFILE.browserPartition,
     profile: LAUNCHER_PROFILE.kind,
     publishState: (state) => send("launcher:browser-state", state),
+    publishTurnObservations: (observations) => send("launcher:turn-observations", observations),
     showWindow: showMainWindow,
     getBrowserInteractionMode: () => stateStore.read().browserInteractionMode,
   });
@@ -1170,6 +1249,7 @@ async function start() {
     platform: process.platform,
     arch: process.arch,
     packaged: app.isPackaged && !IS_DEV_PROFILE,
+    buildInfo: diagnosticBuildSnapshot().launcherBuild,
     executablePath: process.execPath,
     runtimeExecutable: updaterRuntimeRoot
       ? runtimeBundlePaths(updaterRuntimeRoot, process.platform).executable

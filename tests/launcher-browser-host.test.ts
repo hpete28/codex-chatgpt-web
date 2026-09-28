@@ -22,24 +22,55 @@ import {
   waitForLauncherManualTerminal,
 } from "../src/launcher-browser-host";
 import type { Browser, BrowserContext, Page } from "playwright-core";
+import { ChatGptBrowserWorker } from "../src/adapters/chatgpt-web/browser-worker";
 
 const roots: string[] = [];
 
+test("a blocked sign-in replaces an opaque navigation abort with a non-retryable session error", async () => {
+  let needsSignIn: unknown = true;
+  const server = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(req) {
+    const activity = await req.json() as { phase: string };
+    return Response.json(activity.phase === "start"
+      ? { surfaceId: "a".repeat(32), reused: false, connectorBound: false }
+      : { cancelledByUser: false, authenticationRequired: needsSignIn });
+  } });
+  try {
+    const descriptor = descriptorFile(`http://127.0.0.1:${server.port}`);
+    const worker = Object.assign(Object.create(ChatGptBrowserWorker.prototype), {
+      config: { browserHost: "launcher", browserHostDescriptorPath: descriptor },
+      runBrowserTurn: async () => { throw new Error("page.goto: net::ERR_ABORTED"); },
+    });
+    const turn = { traceId: "auth-redirect", capabilities: { localToolsEnabled: false } };
+    await expect(worker.runExclusive(turn)).rejects.toMatchObject({
+      status: 401, code: "chatgpt_sign_in_required", retryable: false,
+    });
+    needsSignIn = false;
+    await expect(worker.runExclusive(turn)).rejects.toThrow("page.goto: net::ERR_ABORTED");
+    needsSignIn = "true";
+    await expect(notifyLauncherTurn(descriptor, { phase: "end", traceId: "auth-redirect", helperPid: process.pid, status: "failed" }))
+      .rejects.toThrow("invalid authentication state");
+  } finally { server.stop(true); }
+});
+
 test("startup waits beyond five seconds and distinguishes its deadline from caller cancellation", async () => {
   let calls = 0;
+  let thirdStarted!: () => void;
+  const thirdRequest = new Promise<void>(resolve => { thirdStarted = resolve; });
   const server = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch() {
     calls++;
-    await Bun.sleep(calls === 1 ? 5_100 : 80);
+    if (calls === 3) thirdStarted();
+    await Bun.sleep(calls === 1 ? 5_100 : 250);
     return Response.json({ surfaceId: "a".repeat(32), reused: false, connectorBound: false });
   } });
   try {
     const descriptor = descriptorFile(`http://127.0.0.1:${server.port}`);
     const activity = { phase: "start" as const, traceId: "bounded-start", helperPid: process.pid };
     await expect(notifyLauncherTurn(descriptor, activity)).resolves.toMatchObject({ reused: false });
-    await expect(notifyLauncherTurn(descriptor, activity, 10)).rejects.toThrow("start timed out after 10ms");
+    await expect(notifyLauncherTurn(descriptor, activity, 50)).rejects.toThrow("start timed out after 50ms");
     const controller = new AbortController();
     const pending = notifyLauncherTurn(descriptor, activity, undefined, controller.signal);
-    setTimeout(() => controller.abort(), 10);
+    await thirdRequest;
+    controller.abort();
     await expect(pending).rejects.toMatchObject({ name: "AbortError" });
     expect(calls).toBe(3);
   } finally { server.stop(true); }

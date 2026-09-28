@@ -14,6 +14,32 @@ const {
   validateReleaseAssetUrl,
 } = require("../electron/update.cjs");
 
+const officialBuildInfo = Object.freeze({
+  schemaVersion: 1,
+  distribution: "official",
+  repository: "miuuyy/codex-chatgpt-web",
+  sourceRevision: "a".repeat(40),
+  dirty: false,
+});
+
+test("custom and unknown builds cannot install public launcher updates", async () => {
+  for (const buildInfo of [undefined, {
+    ...officialBuildInfo,
+    distribution: "custom",
+    repository: "hpete28/codex-chatgpt-web",
+  }]) {
+    let fetched = false;
+    const controller = createUpdateController({
+      currentVersion: "6.1.2", platform: "win32", arch: "x64", packaged: true,
+      buildInfo,
+      dependencies: { fetchRelease: async () => { fetched = true; throw new Error("Unexpected fetch"); } },
+    });
+    assert.equal(controller.getState().status, "disabled");
+    await assert.rejects(controller.beginInstall(), /Public launcher updates are disabled/);
+    assert.equal(fetched, false);
+  }
+});
+
 test("Linux auto-update fails closed without the stable installer wrapper", () => {
   const previousAppImage = process.env.CODEX_WEB_GPT_APPIMAGE;
   const previousWrapper = process.env.CODEX_WEB_GPT_LAUNCHER_EXECUTABLE;
@@ -54,6 +80,7 @@ test("unsupported Linux launches reject updates before downloading or changing s
       const states = [];
       const controller = createUpdateController({
         currentVersion: "1.1.4", platform: "linux", arch: "x64", packaged: true,
+        buildInfo: officialBuildInfo,
         publish: state => states.push(state.status),
         dependencies: {
           fetchRelease: async () => ({
@@ -130,6 +157,7 @@ test("startup check runs once and exposes only a newer complete release", async 
     platform: "linux",
     arch: "x64",
     packaged: true,
+    buildInfo: officialBuildInfo,
     executablePath: "/tmp/launcher",
     runtimeExecutable: "/tmp/bun",
     logsDirectory: "/tmp/logs",
@@ -164,6 +192,7 @@ test("preview and draft releases stay hidden until promoted, regardless of the v
     for (const flags of [{ prerelease: true }, { draft: true }, { prerelease: false, draft: false }]) {
       const controller = createUpdateController({
         currentVersion: "1.1.4", platform: "linux", arch: "x64", packaged: true,
+        buildInfo: officialBuildInfo,
         dependencies: {
           fetchRelease: async () => ({
             tag_name: `v${tag}`, ...flags,
@@ -205,6 +234,7 @@ for (const arch of ["x64", "arm64"]) {
         platform: "linux",
         arch,
         packaged: true,
+        buildInfo: officialBuildInfo,
         executablePath: "/tmp/launcher",
         runtimeExecutable: "/durable/bun",
         logsDirectory: path.join(root, "logs"),

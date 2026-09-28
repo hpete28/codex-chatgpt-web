@@ -32,6 +32,22 @@ import {
 
 const roots: string[] = [];
 
+const canCreateSymlinks = (() => {
+  if (process.platform !== "win32") return true;
+  const root = join(tmpdir(), `codex-chatgpt-web-symlink-probe-${process.pid}`);
+  try {
+    mkdirSync(root, { recursive: true });
+    writeFileSync(join(root, "target"), "probe");
+    symlinkSync(join(root, "target"), join(root, "alias"));
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EPERM") return false;
+    throw error;
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+})();
+
 function nativeConfig(mode: "browser-only" | "full") {
   const config = defaultConfig(mode);
   config.subagentProtocol = "native";
@@ -62,7 +78,7 @@ afterEach(() => {
 });
 
 describe("reversible native Codex route integration", () => {
-  test("route install, update, switching and removal preserve a symlinked shared Codex config", () => {
+  test.skipIf(!canCreateSymlinks)("route install, update, switching and removal preserve a symlinked shared Codex config", () => {
     const { root, codexHome } = fixture();
     const shared = join(root, "shared");
     mkdirSync(shared, { mode: 0o750 });
@@ -96,7 +112,7 @@ describe("reversible native Codex route integration", () => {
     expect(readFileSync(target, "utf8")).toBe(original);
   });
 
-  test("config compensation preserves the link and refuses redirected or invalid targets", () => {
+  test.skipIf(!canCreateSymlinks)("config compensation preserves the link and refuses redirected or invalid targets", () => {
     const { root, codexHome } = fixture();
     const alias = join(codexHome, "config.toml");
     const target = join(root, "shared.toml");

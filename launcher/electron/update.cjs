@@ -12,6 +12,17 @@ const RELEASE_API_URL = `https://api.github.com/repos/${REPOSITORY}/releases/lat
 const USER_AGENT = "codex-web-gpt-launcher-updater";
 const MAX_REDIRECTS = 5;
 
+function isOfficialReleaseBuild(value) {
+  return value && typeof value === "object" && !Array.isArray(value)
+    && Reflect.ownKeys(value).length === 5
+    && value.schemaVersion === 1
+    && value.distribution === "official"
+    && value.repository === REPOSITORY
+    && typeof value.sourceRevision === "string"
+    && /^[a-f0-9]{40}$/i.test(value.sourceRevision)
+    && value.dirty === false;
+}
+
 function parseVersion(value) {
   const match = /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$/.exec(String(value || "").trim());
   if (!match) return null;
@@ -266,9 +277,12 @@ function createUpdateController({
 }) {
   const deps = { ...defaultDependencies(), ...dependencies };
   const supportedAsset = releaseAssetName(currentVersion, platform, arch);
+  const officialBuild = isOfficialReleaseBuild(buildInfo);
   const validatedBuildInfo = validateBuildInfo(buildInfo);
   let state = !packaged || !supportedAsset
     ? { status: "disabled" }
+    : officialBuild
+      ? { status: "idle" }
     : validatedBuildInfo
       ? { status: "disabled", reason: "custom-build" }
       : { status: "disabled", reason: "unknown-build" };
