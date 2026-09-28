@@ -1303,6 +1303,7 @@ async function start() {
       platform: process.platform,
       packaged: app.isPackaged,
       runtimeVerified: true,
+      ...diagnosticBuildSnapshot(),
     })}\n`);
     browserHost.destroy();
     await browserControl.close();
