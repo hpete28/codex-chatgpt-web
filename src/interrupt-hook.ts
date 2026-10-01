@@ -1,6 +1,6 @@
 // Keep Interrupt startup within Codex's fixed three-second budget: no browser/CLI imports.
 import { stdin } from "node:process";
-import { isAbsolute } from "node:path";
+import { basename, isAbsolute } from "node:path";
 import { loadConfig } from "./config";
 import { interruptActiveTurn } from "./service";
 
@@ -26,7 +26,9 @@ export async function interruptHookCommand(args: string[]): Promise<void> {
   await interruptActiveTurn(loadConfig(), { threadId, turnId });
 }
 
-if (import.meta.main) {
+// Bun inlines modules into cli.js; import.meta.main alone then describes the
+// combined entrypoint. Only the dedicated helper may parse helper arguments.
+if (import.meta.main && /^interrupt-hook\.(ts|js)$/.test(basename(process.argv[1] ?? ""))) {
   const args = process.argv.slice(2);
   const flag = args.shift();
   const home = args.shift();
