@@ -129,16 +129,25 @@ max_depth = 2
 [features]
 multi_agent = true
 multi_agent_v2 = false
+hooks = true
 
 [[hooks.PreToolUse]]
 matcher = "^(spawn_agent|Agent)$"
 [[hooks.PreToolUse.hooks]]
 type = "command"
-command = '"<candidate-bun>" "<candidate-cli>" --home "<candidate-bridge-home>" hook web-only-subagents'
+command = "<platform command generated with codexCommandHook>"
 timeout = 10
 ```
 
-Paths/quoting must match the platform. Use the runtime's `buildWebOnlyModelCatalog`
+Generate that command from source with the exported `codexCommandHook` in
+`src/codex-interrupt-hook.ts`, passing
+`[candidateBun, candidateCli, "--home", candidateBridgeHome, "hook", "web-only-subagents"]`.
+Use absolute paths and serialize the returned value with `JSON.stringify` for
+the TOML string. Current Codex inherits the session shell on Windows; a quoted
+cmd.exe-style executable alone will not run under PowerShell. The generator
+uses an encoded PowerShell invocation compatible with both shells.
+
+Use the runtime's `buildWebOnlyModelCatalog`
 with the chosen Codex binary's `debug models --bundled` JSON to prepare the local
 catalog. The protected `/models` endpoint can instead derive it from a usable
 local `models_cache.json`; it never sends the capability to OpenAI. If neither
