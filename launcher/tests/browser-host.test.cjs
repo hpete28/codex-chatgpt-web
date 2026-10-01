@@ -19,6 +19,7 @@ const {
   isChatGptCloudflareChallengeResponse,
   isTemporaryChatUrl,
   loadCommittedBrowserSurface,
+  loadIdleSurfaceWithRetry,
   MANUAL_COMPACTION_SUBMIT_TIMEOUT_MS,
   MANUAL_SUBMIT_TIMEOUT_MS,
   navigationErrorForLog,
@@ -185,6 +186,35 @@ test("primary browser bootstrap fails closed on navigation, renderer, and timeou
     assert.deepEqual(calls, ["stop"]);
   } finally {
     clearTimeout(keepTestAlive);
+  }
+});
+
+test("idle bootstrap retries a stalled renderer, commits on retry and leaves no listeners", async () => {
+  const keepAlive = setTimeout(() => {}, 2_000);
+  const contents = new EventEmitter();
+  let url = "about:blank", attempts = 0, stops = 0;
+  contents.isDestroyed = () => false;
+  contents.getURL = () => url;
+  contents.stop = () => { stops++; };
+  contents.loadURL = async target => { if (++attempts === 2) url = target; };
+  try { await loadIdleSurfaceWithRetry(contents, { warn() {} }, 10); }
+  finally { clearTimeout(keepAlive); }
+  assert.equal(attempts, 2);
+  assert.ok(stops >= 1);
+  assert.equal(contents.eventNames().length, 0);
+});
+
+test("idle bootstrap retries are bounded and never retry a destroyed WebContents", async () => {
+  for (const destroyed of [false, true]) {
+    const contents = new EventEmitter();
+    let attempts = 0;
+    contents.isDestroyed = () => destroyed;
+    contents.getURL = () => "about:blank";
+    contents.stop = () => {};
+    contents.loadURL = () => { attempts++; return Promise.reject(new Error("cold renderer failed")); };
+    await assert.rejects(loadIdleSurfaceWithRetry(contents, { warn() {} }, 10));
+    assert.equal(attempts, destroyed ? 0 : 3);
+    assert.equal(contents.eventNames().length, 0);
   }
 });
 

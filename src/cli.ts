@@ -25,11 +25,12 @@ import { runChatGptMcpMain } from "./adapters/chatgpt-web/mcp-main";
 import { runCommand } from "./process";
 import { startServer } from "./server";
 import { webOnlySpawnHook } from "./web-only-subagents";
-import { assertServiceIdle, cancelActiveTurns, getServiceStatus, installService, interruptActiveTurn, restartService, startService, stopService, uninstallService } from "./service";
+import { assertServiceIdle, cancelActiveTurns, getServiceStatus, installService, restartService, startService, stopService, uninstallService } from "./service";
 import { existingFullSetupCredentials, preflightSetup, setup, type SetupOptions } from "./setup";
 import { installRuntimeKeyBytes, managedRuntimeKeyPath, stopTunnel, tunnelStatus, waitForTunnelReady } from "./tunnel";
 import { getTunnelServiceStatus, restartTunnelService, startTunnelService, stopTunnelService, uninstallTunnelService } from "./tunnel-service";
 import { VERSION } from "./version";
+import { interruptHookCommand } from "./interrupt-hook";
 import { runDevCommand } from "./dev-chat/cli";
 
 const HELP = `codex-chatgpt-web ${VERSION}
@@ -456,32 +457,6 @@ async function serviceCommand(args: string[]): Promise<void> {
             : undefined;
   if (!status) throw new Error(`Unknown service action: ${action}`);
   stdout.write(`${JSON.stringify(status, null, 2)}\n`);
-}
-
-async function interruptHookCommand(args: string[]): Promise<void> {
-  assertNoArgs(args);
-  const chunks: Buffer[] = [];
-  let bytes = 0;
-  for await (const chunk of stdin) {
-    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-    bytes += buffer.byteLength;
-    if (bytes > 32 * 1024) throw new Error("Codex Interrupt hook payload is too large");
-    chunks.push(buffer);
-  }
-  let payload: { hook_event_name?: unknown; session_id?: unknown; turn_id?: unknown };
-  try {
-    payload = JSON.parse(Buffer.concat(chunks).toString("utf8"));
-  } catch {
-    throw new Error("Codex Interrupt hook payload is not valid JSON");
-  }
-  const threadId = typeof payload.session_id === "string" ? payload.session_id.trim() : "";
-  const turnId = typeof payload.turn_id === "string" ? payload.turn_id.trim() : "";
-  if (payload.hook_event_name !== "Interrupt"
-    || !/^[A-Za-z0-9_-]{6,128}$/.test(threadId)
-    || !/^[A-Za-z0-9_-]{6,128}$/.test(turnId)) {
-    throw new Error("Codex Interrupt hook payload has no valid session_id or turn_id");
-  }
-  await interruptActiveTurn(loadConfig(), { threadId, turnId });
 }
 
 async function webOnlySubagentHookCommand(args: string[]): Promise<void> {

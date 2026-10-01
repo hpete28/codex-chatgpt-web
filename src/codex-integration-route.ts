@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
+import { getStaticTOMLValue, parseTOML } from "toml-eslint-parser";
 import {
   CODEX_REALTIME_WEBRTC_CALL_BASE_URL,
   MANAGED_COMMENT,
@@ -173,7 +174,9 @@ export function verifyManagedJournalState(text: string, journal: ManagedRouteJou
 }
 
 export function assertBuiltinModelProvider(text: string): void {
-  const { model_provider: provider } = Bun.TOML.parse(splitLines(text).join("\n")) as { model_provider?: unknown };
+  const { model_provider: provider } = getStaticTOMLValue(
+    parseTOML(splitLines(text).join("\n"), { tomlVersion: "1.0" }),
+  ) as { model_provider?: unknown };
   if (provider !== undefined && provider !== "openai") {
     throw new Error(
       "Codex model_provider selects a custom provider; the bridge requires the built-in openai provider. "

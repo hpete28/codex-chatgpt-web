@@ -26,6 +26,12 @@ if (bundled.status !== 0) {
 const nativeCatalog = JSON.parse(bundled.stdout);
 
 const root = join(tmpdir(), `codex-chatgpt-web-interrupt-${process.pid}-${Date.now()}`);
+// Production invokes a bundled CLI. Importing the entire development source tree
+// exceeds Codex's fixed three-second Interrupt budget on a cold Windows machine.
+const hookBuildDirectory = resolve(`output/interrupt-smoke-${process.pid}`);
+const hookBuild = await Bun.build({ entrypoints: [resolve("src/cli.ts"), resolve("src/interrupt-hook.ts")], target: "bun", minify: true,
+  packages: "external", external: ["playwright-core"], outdir: hookBuildDirectory, naming: "[name].js" });
+if (!hookBuild.success) throw new Error(hookBuild.logs.map(log => log.message).join("\n"));
 const codexHome = join(root, "codex");
 const appHome = join(root, "app");
 mkdirSync(codexHome, { recursive: true });
@@ -35,9 +41,10 @@ process.env.CODEX_CHATGPT_WEB_HOME = appHome;
 let adapterStarted = false;
 let adapterAborted = false;
 let browserAborted = false;
+let adapterFailure: string | undefined;
 chatGptTurnSessions.clear();
 const config = { ...defaultConfig("browser-only"), port: 0, subagentProtocol: "native" as const };
-config.runtimeCommand = [resolve(process.execPath), resolve("src/cli.ts")];
+config.runtimeCommand = [resolve(process.execPath), join(hookBuildDirectory, "cli.js")];
 const server = startServer(config, {
   fetchUpstream: async request => {
     if (new URL(request.url).pathname.endsWith("/models")) return Response.json(nativeCatalog);
@@ -49,7 +56,11 @@ const server = startServer(config, {
       adapterStarted = true;
       const identity = extractChatGptTurnIdentity(parsed);
       if (!identity.threadId || !identity.turnId) {
-        reject(new Error("Routed smoke turn has no native Codex identity"));
+        adapterFailure = `Routed smoke turn has no native Codex identity: ${JSON.stringify({
+          metadata: (parsed._rawBody as any)?.client_metadata,
+          header: incoming.headers?.get("x-codex-turn-metadata"),
+        })}`;
+        reject(new Error(adapterFailure));
         return;
       }
       let rejectBrowser!: (error: Error) => void;
@@ -182,6 +193,10 @@ class AppServerClient {
     await this.child.exited;
     return { stderr };
   }
+
+  diagnostics(): unknown[] {
+    return this.notifications.filter(message => message.method?.includes("hook") || message.method === "error");
+  }
 }
 
 const client = new AppServerClient();
@@ -232,7 +247,7 @@ try {
   if (!adapterStarted || activeHttpTurns !== 1 || activeBrowserTurns !== 1) {
     throw new Error(
       `Routed turn did not become active: adapterStarted=${adapterStarted} `
-      + `activeHttpTurns=${activeHttpTurns} activeBrowserTurns=${activeBrowserTurns}`,
+      + `activeHttpTurns=${activeHttpTurns} activeBrowserTurns=${activeBrowserTurns}; ${adapterFailure ?? ""}`,
     );
   }
 
@@ -268,9 +283,10 @@ try {
   chatGptTurnSessions.clear();
   await server.stop(true);
   rmSync(root, { recursive: true, force: true });
+  rmSync(hookBuildDirectory, { recursive: true, force: true });
   delete process.env.CODEX_HOME;
   delete process.env.CODEX_CHATGPT_WEB_HOME;
   if (smokeError) {
-    throw new Error(`${smokeError instanceof Error ? smokeError.message : String(smokeError)}\nCodex stderr:\n${stderr.slice(-8_000)}`);
+    throw new Error(`${smokeError instanceof Error ? smokeError.message : String(smokeError)}\nHook diagnostics: ${JSON.stringify(client.diagnostics())}\nCodex stderr:\n${stderr.slice(-8_000)}`);
   }
 }

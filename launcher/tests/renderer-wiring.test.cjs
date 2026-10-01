@@ -71,7 +71,8 @@ test("Bigger Context waits for startup and route recovery without invalidating h
     const logger = { info() {}, error() {} };
     const context = vm.createContext({
       runtimeStartup, finishRuntimeStartup: () => { startupSettled = true; finishRuntimeStartup(); },
-      startupAuthenticationRefresh, logger, stateStore, IS_DEV_PROFILE: false,
+      startupAuthenticationRefresh, browserStartup: Promise.resolve(), browserStartupError: null, routeWatchdogReady: true,
+      logger, stateStore, IS_DEV_PROFILE: false,
       ipcMain: { on() {} }, registerLoggedIpc: (_ipc, _logger, channel, handler) => handlers.set(channel, handler),
       send() {}, publishOperation() {}, startCatalogVerificationMonitor() {},
       restoreCodexRouteAfterRuntimeFailure: async () => { calls.push("recovery"); return {}; },
@@ -103,7 +104,7 @@ test("Bigger Context waits for startup and route recovery without invalidating h
     const setting = handlers.get("launcher:bigger-context")({}, true);
     // Read-only UI remains usable while authentication/startup is pending.
     assert.equal((await handlers.get("launcher:limits")()).enabled, false);
-    assert.deepEqual(calls, []);
+    assert.ok(!calls.includes("route") && !calls.includes("setting"));
     completeAuthentication();
     await setting;
     assert.deepEqual(calls, fails ? ["startup", "recovery", "setting"] : ["startup", "route", "setting"]);
@@ -228,6 +229,8 @@ test("startup failure stays visible on another launch and Retry exits the failed
   const sandbox = {
     mainWindow: window, mainWindowReadyToShow: false, mainWindowShowRequested: false,
     startupFailed: false, quitting: false,
+    finishRuntimeStartup() {}, IS_DEV_PROFILE: false,
+    routeRecovery: { restoreNativeRoute: () => events.push("route restored") },
     browserHost: { destroy: () => events.push("destroy") },
     browserControl: { close: async () => events.push("control closed") },
     start: async () => { throw new Error("Browser idle document did not commit within 10000ms"); },
@@ -256,7 +259,7 @@ test("startup failure stays visible on another launch and Retry exits the failed
   vm.runInContext(source, sandbox);
   await dialogOpened;
   assert.equal(visible, true, "the failed startup must expose its error owner without renderer readiness");
-  assert.deepEqual(events.slice(0, 2), ["destroy", "control closed"]);
+  assert.deepEqual(events.slice(0, 3), ["route restored", "destroy", "control closed"]);
   visible = false;
   sandbox.showMainWindow();
   assert.equal(visible, true, "a second launch must restore the existing startup error window");
@@ -275,7 +278,7 @@ test("packaged runtime is verified before launcher browser surfaces can bind por
   const cdpPortAllocation = electronMain.indexOf("cdpPort = await findFreePort();", start);
   const windowCreation = electronMain.indexOf("mainWindow = createWindow({", start);
   const controlServerStart = electronMain.indexOf("browserControl = await new BrowserControlServer({", start);
-  const browserReady = electronMain.indexOf("await browserHost.ready();", start);
+  const browserReady = electronMain.indexOf("const browserStartup = browserHost.ready()", start);
 
   assert.ok(runtimeValidation > start, "startup must eagerly verify the packaged runtime");
   for (const [surface, position] of [
@@ -440,15 +443,15 @@ test("MCP verification proves runtime health before checking the connector", () 
   assert.match(appSource, /operation\?\.name === "mcp-verification"/);
 });
 
-test("saved ChatGPT authentication is refreshed before setup is presented", () => {
+test("native runtime starts independently while browser-dependent upgrades and routing await readiness", () => {
   assert.match(electronMain, /browserHost\.refreshAuthentication\(\)/);
   const productionStartup = electronMain.indexOf("} else void (async () => {");
   const refreshBarrier = electronMain.indexOf("await startupAuthenticationRefresh", productionStartup);
-  const upgrade = electronMain.indexOf("runtimeHost.upgradeManagedRuntime()", productionStartup);
+  const upgrade = electronMain.indexOf("runtimeHost.upgradeManagedRuntime({ beforeSetup:", productionStartup);
   const runtimeStart = electronMain.indexOf("runtimeSupervisor.startIfConfigured()", upgrade);
   const routeConnect = electronMain.indexOf("runtimeHost.connectBridgeRoute()", runtimeStart);
   assert.ok(refreshBarrier > productionStartup, "production startup must wait for saved-session refresh");
-  assert.ok(upgrade > refreshBarrier, "runtime upgrade must not inspect the browser before refresh settles");
+  assert.ok(refreshBarrier > upgrade, "browser-dependent upgrade work has a readiness callback");
   assert.ok(runtimeStart > upgrade, "configured runtime must start after any upgrade");
   assert.ok(routeConnect > runtimeStart, "Codex route must connect only after the runtime is healthy");
   assert.match(appSource, /browser\?\.status === "loading" \? copy\.checkingSignIn/);

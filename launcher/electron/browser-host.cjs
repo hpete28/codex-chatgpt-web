@@ -302,6 +302,20 @@ function loadCommittedBrowserSurface(
   });
 }
 
+async function loadIdleSurfaceWithRetry(contents, logger, timeoutMs = PRIMARY_VIEW_BOOTSTRAP_TIMEOUT_MS) {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      await loadCommittedBrowserSurface(contents, IDLE_BROWSER_URL, timeoutMs);
+      return;
+    } catch (error) {
+      if (attempt >= 3 || contents.isDestroyed()) throw error;
+      contents.stop();
+      logger.warn("browser.bootstrap_retry", { attempt, ...navigationErrorForLog(error) });
+      await new Promise(resolve => setTimeout(resolve, 250));
+    }
+  }
+}
+
 class BrowserHost {
   constructor({
     window,
@@ -445,7 +459,7 @@ class BrowserHost {
     this.view.setBounds(this.hiddenTurnBounds());
     this.view.setVisible(true);
     try {
-      await loadCommittedBrowserSurface(this.view.webContents, IDLE_BROWSER_URL);
+      await loadIdleSurfaceWithRetry(this.view.webContents, this.logger);
       if (browserInteractionModeFor(this) === "automatic") await this.markOwnedSurface();
     } finally {
       this.syncViewVisibility();
@@ -3167,6 +3181,7 @@ module.exports = {
   isChatGptCloudflareChallengeResponse,
   isTemporaryChatUrl,
   loadCommittedBrowserSurface,
+  loadIdleSurfaceWithRetry,
   MANUAL_SUBMIT_TIMEOUT_MS,
   MANUAL_COMPACTION_SUBMIT_TIMEOUT_MS,
   navigationErrorForLog,

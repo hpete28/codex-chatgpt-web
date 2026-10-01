@@ -146,6 +146,7 @@ try {
   if (marker.ok !== true
     || marker.packaged !== true
     || marker.runtimeVerified !== true
+    || marker.routeRecoveryReady !== true
     || marker.version !== expectedVersion
     || marker.platform !== process.platform
     || !marker.launcherBuild

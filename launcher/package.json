@@ -12,7 +12,7 @@
     "audit": "bun audit",
     "typecheck": "tsc --noEmit",
     "build:renderer": "vite build",
-    "build": "bun run build:identity && bun run typecheck && bun run build:renderer",
+    "build": "bun run build:identity && bun run ../scripts/build-launcher-recovery.ts && bun run typecheck && bun run build:renderer",
     "build:runtime": "bun run scripts/prepare-runtime.cjs",
     "package": "bun run build && bun run build:runtime && node scripts/generate-build-info.cjs --release && bun run scripts/package.cjs",
     "package:mac": "bun run build && bun run build:runtime && node scripts/generate-build-info.cjs --release && bun run scripts/package.cjs --mac",
@@ -39,7 +39,7 @@
   },
   "overrides": {
     "@xmldom/xmldom": "0.8.15",
-    "fast-uri": "3.1.6"
+    "fast-uri": "3.1.8"
   },
   "build": {
     "appId": "dev.codexwebgpt.launcher",
@@ -55,6 +55,7 @@
     "files": [
       "dist/**",
       "electron/**",
+      "build/route-recovery.cjs",
       "assets/icon.png",
       "assets/trayTemplate*.png",
       "assets/linux-appimage-runner.sh",

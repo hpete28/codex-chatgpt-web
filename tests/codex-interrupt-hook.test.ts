@@ -1,10 +1,12 @@
 import { expect, test } from "bun:test";
-import { mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
   MANAGED_INTERRUPT_HOOK_END,
   codexInterruptHookCommand,
+  codexCommandHook,
   codexInterruptHookHash,
   installCodexInterruptHook,
   installCodexInterruptHookCommand,
@@ -98,15 +100,38 @@ test("Interrupt hook command is absolute, quoted, and bound to the exact applica
     "'/Applications/Codex Web GPT.app/runtime/bun' '/Applications/Codex Web GPT.app/app/cli.js'"
       + " '--home' '/Users/test/Application Support/Codex Web GPT' 'hook' 'interrupt'",
   );
-  expect(codexInterruptHookCommand(
+  const windowsCommand = codexInterruptHookCommand(
     { runtimeCommand: ["C:\\Program Files\\Codex Web GPT\\bun.exe", "C:\\Program Files\\Codex Web GPT\\cli.js"] },
     "C:\\Users\\test\\Codex Web GPT",
     "win32",
-  )).toBe(
-    '"C:\\Program Files\\Codex Web GPT\\bun.exe" "C:\\Program Files\\Codex Web GPT\\cli.js"'
-      + ' "--home" "C:\\Users\\test\\Codex Web GPT" "hook" "interrupt"',
+  );
+  expect(windowsCommand).toStartWith("powershell.exe -NoProfile -NonInteractive -EncodedCommand ");
+  expect(Buffer.from(windowsCommand.split(" ").at(-1)!, "base64").toString("utf16le")).toBe(
+    "$ErrorActionPreference = 'Stop'; & 'C:\\Program Files\\Codex Web GPT\\bun.exe'"
+    + " 'C:\\Program Files\\Codex Web GPT\\cli.js' '--home' 'C:\\Users\\test\\Codex Web GPT' 'hook' 'interrupt'; exit $LASTEXITCODE",
   );
 });
+
+test.skipIf(process.platform !== "win32")("Windows hook executes literal arguments under both cmd and PowerShell", () => {
+  const root = mkdtempSync(join(tmpdir(), "hook shell %USERNAME% & $literal ' "));
+  const script = join(root, "echo.js");
+  const args = ["--home", root, "hook", "interrupt"];
+  const command = codexCommandHook([process.execPath, script, ...args]);
+  try {
+    for (const [shell, flags] of [
+      [process.env.ComSpec ?? "cmd.exe", ["/d", "/s", "/c"]],
+      ["powershell.exe", ["-NoProfile", "-NonInteractive", "-Command"]],
+    ] as const) {
+      writeFileSync(script, "console.log(JSON.stringify(process.argv.slice(2))); process.exit(0);");
+      const result = spawnSync(shell, [...flags, command], { encoding: "utf8", timeout: 10_000, windowsHide: true });
+      expect(result.status).toBe(0);
+      expect(JSON.parse(result.stdout.trim())).toEqual(args);
+      writeFileSync(script, "process.exit(7);");
+      const failed = spawnSync(shell, [...flags, command], { encoding: "utf8", timeout: 10_000, windowsHide: true });
+      expect(failed.status).not.toBe(0);
+    }
+  } finally { rmSync(root, { recursive: true, force: true }); }
+}, 25_000);
 
 test("Interrupt hook trust hash is deterministic and changes with its exact command", () => {
   const first = codexInterruptHookHash("'runtime' 'hook' 'interrupt'");
@@ -122,7 +147,7 @@ test("refuses to remove a modified or duplicated managed hook", () => {
     "/Users/test/.codex/config.toml",
     { runtimeCommand: ["/opt/runtime"] },
   );
-  const modified = installed.text.replace("timeout = 3", "timeout = 2");
+  const modified = installed.text.replace(/timeout = (3|10)/, "timeout = 2");
   expect(() => restoreCodexInterruptHook(modified, installed.installed)).toThrow("changed after setup");
   expect(() => restoreCodexInterruptHook(
     installed.text.replace(MANAGED_INTERRUPT_HOOK_END, `approved = false\n${MANAGED_INTERRUPT_HOOK_END}`),
@@ -165,7 +190,7 @@ test("preserves native TOML editor tables inserted before the trailing hook comm
     expect(restored).toBe(original + appended);
     verifyCodexInterruptHookRestored(restored);
     expect(() => restoreCodexInterruptHook(
-      edited.replace("timeout = 3", "timeout = 2"), installed.installed,
+      edited.replace(/timeout = (3|10)/, "timeout = 2"), installed.installed,
     )).toThrow("changed after setup");
   }
 });
@@ -189,7 +214,7 @@ test("restores a hook whose end comment moved before unchanged definitions witho
       verifyCodexInterruptHookRestored(restored);
 
       for (const changed of [
-        edited.replace("timeout = 3", "timeout = 2"),
+        edited.replace(/timeout = (3|10)/, "timeout = 2"),
         edited + "approved = false\n",
         edited + '\n[[hooks.Interrupt.hooks]]\ntype = "command"\ncommand = "unexpected-command"\n',
         edited + `\n[hooks.state.${JSON.stringify(installed.installed.stateKey)}.unexpected]\nvalue = true\n`,
@@ -219,7 +244,7 @@ test("keeps foreign TOML tables inserted between the managed hook and its trust 
     verifyCodexInterruptHook(next.text, next.installed);
     expect(restoreCodexInterruptHook(next.text, next.installed)).toBe(restored);
     for (const changed of [
-      edited.replace("timeout = 3", "timeout = 2"),
+      edited.replace(/timeout = (3|10)/, "timeout = 2"),
       edited.replace(installed.installed.trustedHash, "sha256:changed"),
       edited + `\n[hooks.state.${JSON.stringify(installed.installed.stateKey)}.extra]\nchanged = true\n`,
       edited + '\n[[hooks.Interrupt.hooks]]\ntype = "command"\ncommand = "unexpected-hook"\n',
@@ -245,7 +270,7 @@ test("preserves ownership when Codex moves trust state before the hook and norma
     expect(parse(restored)).toEqual(parse(original));
     verifyCodexInterruptHookRestored(restored);
     for (const modified of [
-      rewritten.replace("timeout = 3", "timeout = 2"),
+      rewritten.replace(/timeout = (3|10)/, "timeout = 2"),
       rewritten.replace(JSON.stringify(installed.command), JSON.stringify("other-command")),
       rewritten.replace(installed.trustedHash, "sha256:changed"),
       rewritten + state,
@@ -277,7 +302,7 @@ test("accepts a literal-quoted trust-state key while preserving another config p
     verifyCodexInterruptHook(edited, journal);
     expect(restoreCodexInterruptHook(edited, journal)).toBe((original + alias).replaceAll("\n", ending));
     for (const changed of [
-      edited.replace("timeout = 3", "timeout = 2"),
+      edited.replace(/timeout = (3|10)/, "timeout = 2"),
       edited.replace(journal.trustedHash, "sha256:changed"),
       edited.replace(`[hooks.state.'${stateKey}']`, "[hooks.state.'different-key']"),
       edited + `\n[hooks.state.'${stateKey}'.extra]\nchanged = true\n`,

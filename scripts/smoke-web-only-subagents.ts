@@ -10,6 +10,7 @@ import { augmentNativeModelCatalog } from "../src/model-catalog";
 import { bridgeToResponsesSSE } from "../src/bridge";
 import type { AdapterEvent } from "../src/types";
 import { webOnlyModelRejection } from "../src/web-only-subagents";
+import { codexCommandHook } from "../src/codex-interrupt-hook";
 
 const codex = resolve(process.argv[2] ?? "missing-codex-executable");
 const bundled = spawnSync(codex, ["debug", "models", "--bundled"], { encoding: "utf8", timeout: 15_000 });
@@ -25,15 +26,10 @@ writeFileSync(join(root, "hook.ts"), [
   `import { webOnlySpawnHook } from ${JSON.stringify(pathToFileURL(resolve("src/web-only-subagents.ts")).href)};`,
   `const input = await Bun.stdin.json();`,
   `appendFileSync(${JSON.stringify(join(root, "hook-events.jsonl"))}, JSON.stringify({event: input.hook_event_name, model: input.model, tool: input.tool_name}) + "\\n");`,
-  `console.log(JSON.stringify(webOnlySpawnHook(input, ${JSON.stringify(cfg)})));`,
+  `console.log(JSON.stringify(input.hook_event_name === "PreToolUse" ? webOnlySpawnHook(input, ${JSON.stringify(cfg)}) : {}));`,
 ].join("\n"));
-const quote = (s: string) => process.platform === "win32" ? `"${s}"` : `'${s.replaceAll("'", `'"'"'`)}'`;
-const command = [process.execPath, join(root, "hook.ts")].map(quote).join(" ");
-const matcher = "*";
-writeFileSync(join(codexHome, "hooks.json"), JSON.stringify({ hooks: {
-  PreToolUse: [{ matcher, hooks: [{ type: "command", command, timeout: 10 }] }],
-  SessionStart: [{ hooks: [{ type: "command", command, timeout: 10 }] }],
-} }));
+const command = codexCommandHook([process.execPath, join(root, "hook.ts")]);
+const matcher = "^(spawn_agent|Agent)$";
 let step = 0;
 let rootId: string | undefined;
 let childId: string | undefined;
@@ -92,12 +88,14 @@ writeFileSync(configPath, [
   '[model_providers.mock]', 'name = "Local mock only"', `base_url = "http://127.0.0.1:${server.port}/web-only/v1"`,
   'env_key = "WEB_ONLY_MOCK_KEY"', 'wire_api = "responses"', 'supports_websockets = false',
   '[agents]', 'max_depth = 2', '[features]', 'multi_agent = true', 'multi_agent_v2 = false', 'hooks = true',
+  '[[hooks.PreToolUse]]', `matcher = ${JSON.stringify(matcher)}`,
+  '[[hooks.PreToolUse.hooks]]', 'type = "command"', `command = ${JSON.stringify(command)}`, 'timeout = 10',
 ].join("\n"));
 try {
   // This isolated home contains only the hook written above; no user/plugin hook trust is changed.
   const child = Bun.spawn([codex, "--dangerously-bypass-hook-trust", "exec", "--json", "--skip-git-repo-check", "--dangerously-bypass-approvals-and-sandbox", "Run mock policy test"], {
     cwd: root, env: { ...process.env, CODEX_HOME: codexHome, WEB_ONLY_MOCK_KEY: cfg.webOnlySubagents.token,
-      RUST_LOG: "codex_hooks=debug,codex_core::hooks=debug,codex_config=debug" },
+    },
     stdin: "ignore", stdout: "pipe", stderr: "pipe",
   });
   const timeout = setTimeout(() => child.kill(), 45_000);

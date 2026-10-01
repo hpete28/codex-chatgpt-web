@@ -148,6 +148,24 @@ describe("native /models augmentation", () => {
     expect(models.find(model => model.slug === "gpt-5.6-terra")?.multi_agent_version).toBe("v1");
   });
 
+  test("V1 retains tied native Sol/Astra priorities and reserves reasoning/Pro Web choices", () => {
+    const native = source();
+    const nativeModels = native.models as Array<Record<string, unknown>>;
+    const sol = nativeModels.find(model => model.slug === "gpt-5.6-sol")!;
+    nativeModels.push({ ...structuredClone(sol), slug: "gpt-6-astra" });
+    const snapshot = structuredClone(native);
+    const config = defaultConfig("full");
+    config.subagentProtocol = "compatibility-v1";
+    config.proAvailable = true;
+    config.extraHighAvailable = true;
+    const models = augmentNativeModelCatalog(native, config).models as Array<Record<string, unknown>>;
+    const roster = models.filter(model => model.supported_in_api === true && model.visibility === "list")
+      .toSorted((a, b) => Number(a.priority) - Number(b.priority)).slice(0, 5).map(model => model.slug);
+    expect(roster).toEqual(["gpt-5.6-sol", "gpt-6-astra", ...CHATGPT_WEB_MODEL_ROUTES.slice(1).map(route => route.slug)]);
+    expect(models.find(model => model.slug === "gpt-6-astra")?.priority).toBe(sol.priority);
+    expect(native).toEqual(snapshot);
+  });
+
   test("native protocol mode preserves official native rows and gives Web rows the template surface", () => {
     const native = source();
     const snapshot = structuredClone(native);

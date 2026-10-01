@@ -15,6 +15,12 @@ const helperBuild = spawnSync(bun, ["run", "scripts/build-browser-helper.ts"], {
 if (helperBuild.error) throw helperBuild.error;
 if (helperBuild.status !== 0) process.exit(helperBuild.status ?? 1);
 
+const recoveryBuild = spawnSync(bun, ["run", "scripts/build-launcher-recovery.ts"], {
+  cwd: path.resolve(root, ".."), stdio: "inherit", env: process.env,
+});
+if (recoveryBuild.error) throw recoveryBuild.error;
+if (recoveryBuild.status !== 0) process.exit(recoveryBuild.status ?? 1);
+
 const vite = spawn(process.execPath, [viteBin], {
   cwd: root,
   stdio: "inherit",

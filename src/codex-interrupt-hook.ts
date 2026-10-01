@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { realpathSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { basename, dirname, join, posix, resolve, win32 } from "node:path";
 import { getStaticTOMLValue, parseTOML, type AST } from "toml-eslint-parser";
 import type { AppConfig } from "./config";
@@ -40,13 +40,17 @@ function posixShellArgument(value: string): string {
   return `'${value.replaceAll("'", `'"'"'`)}'`;
 }
 
-function cmdShellArgument(value: string): string {
-  if (value.includes('"') || /[\r\n]/.test(value)) {
-    throw new Error("Codex interrupt hook command contains an invalid Windows path character");
+export function codexCommandHook(args: string[], platform: NodeJS.Platform = process.platform): string {
+  if (platform !== "win32") return args.map(posixShellArgument).join(" ");
+  if (args.some(value => value.includes('"') || /[\r\n]/.test(value))) {
+    throw new Error("Codex hook command contains an invalid Windows path character");
   }
-  // Codex executes command hooks through cmd.exe /C on Windows. Quoting every argument preserves
-  // spaces and shell metacharacters in the installed runtime path.
-  return `"${value}"`;
+  // Current Codex inherits the session shell; older clients use cmd.exe. An encoded
+  // PowerShell invocation works under both, without expanding path metacharacters.
+  const script = "$ErrorActionPreference = 'Stop'; & "
+    + args.map(value => `'${value.replaceAll("'", "''")}'`).join(" ")
+    + "; exit $LASTEXITCODE";
+  return `powershell.exe -NoProfile -NonInteractive -EncodedCommand ${Buffer.from(script, "utf16le").toString("base64")}`;
 }
 
 export function codexInterruptHookCommand(
@@ -55,8 +59,19 @@ export function codexInterruptHookCommand(
   platform: NodeJS.Platform = process.platform,
 ): string {
   const absoluteHome = platform === "win32" ? win32.resolve(home) : posix.resolve(home);
-  const args = [...config.runtimeCommand, "--home", absoluteHome, "hook", "interrupt"];
-  return args.map(platform === "win32" ? cmdShellArgument : posixShellArgument).join(" ");
+  let runtimeCommand = config.runtimeCommand;
+  const entry = runtimeCommand[1];
+  if (runtimeCommand.length === 2 && entry && /^cli\.(ts|js)$/.test(basename(entry))) {
+    const helper = join(dirname(entry), entry.endsWith(".ts") ? "interrupt-hook.ts" : "interrupt-hook.js");
+    if (existsSync(helper)) runtimeCommand = [runtimeCommand[0]!, helper];
+  } else if (runtimeCommand.length === 1 && /^codex-chatgpt-web(?:\.cmd)?$/.test(basename(runtimeCommand[0]!))) {
+    const root = resolve(dirname(runtimeCommand[0]!), "..");
+    const helper = join(root, "app", "interrupt-hook.js");
+    const bun = join(root, "runtime", platform === "win32" ? "bun.exe" : "bun");
+    if (existsSync(helper) && existsSync(bun)) runtimeCommand = [bun, helper];
+  }
+  const args = [...runtimeCommand, "--home", absoluteHome, "hook", "interrupt"];
+  return codexCommandHook(args, platform);
 }
 
 function lineEnding(text: string): "\n" | "\r\n" | "\r" {
@@ -174,7 +189,7 @@ function inlineInterruptArray(ast: AST.TOMLProgram): AST.TOMLArray | undefined {
 }
 
 function parseHookDocument(text: string): HookDocument {
-  return Bun.TOML.parse(text.replace(/\r\n?/g, "\n")) as HookDocument;
+  return getStaticTOMLValue(parseTOML(text.replace(/\r\n?/g, "\n"), { tomlVersion: "1.0" })) as HookDocument;
 }
 
 function withoutEmptyHookContainers(document: HookDocument): unknown {
@@ -343,7 +358,7 @@ export function restoreCodexInterruptHook(
   // Explicit Setup can reinstall a fully removed hook. A stale journal alone does not mean
   // there is still a definition to remove; partial edits must retain the strict checks below.
   if (options.allowAbsent && managedMarkerCount(text) === 0 && !text.includes(MANAGED_INTERRUPT_HOOK_END)) {
-    const { hooks } = Bun.TOML.parse(text) as { hooks?: unknown };
+    const { hooks } = parseHookDocument(text);
     if (hooks === undefined) return text;
     if (hooks && typeof hooks === "object" && !Array.isArray(hooks) && !Object.hasOwn(hooks, "Interrupt")) {
       const state = (hooks as Record<string, unknown>).state;

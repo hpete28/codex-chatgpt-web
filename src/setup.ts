@@ -20,6 +20,7 @@ import {
   storedBrowserLoginCapabilities,
 } from "./browser-login";
 import {
+  deactivateCodexIntegration,
   installCodexIntegration,
   preflightCodexIntegration,
   readCodexSubagentProtocol,
@@ -641,6 +642,9 @@ export async function setup(options: SetupOptions): Promise<SetupResult> {
   installCodexIntegration(config, {
     replaceExistingRoute: options.replaceCodexRoute,
   });
+  // The launcher starts the supervisor after this transaction. Keep the saved
+  // native route until that runtime has proven ready; preserve the journal.
+  if (launcherOwned) deactivateCodexIntegration();
 
   return {
     mode: config.mode,

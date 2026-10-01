@@ -1,0 +1,48 @@
+# October 1 startup recovery and upstream integration
+
+This work supersedes the September 26 plan's live-state descriptions. It does not authorize another production cutover. The October 1 user request requires isolated validation and a separate production deployment decision.
+
+## State and rollback
+
+- Canonical `main` and `origin/main` started at `1fb7f74`. Backup: `backup/main-before-startup-repair-20261001`.
+- Isolated worktree: `D:\Projects\codex-chatgpt-web-sync-20261001`, branch `sync/upstream-20261001-v6.1.3`.
+- Reused the prior 6.1.2 integration `d79a065`; merged upstream 6.1.3 (`fa2d2c6`) in `8ad2e22`. The renderer test conflict was resolved by retaining both custom diagnostics/build identity tests and upstream startup/settings serialization tests. No historical worktree or backup was removed.
+- Installed launcher/runtime: 6.1.0, clean revision `55f430876beee47319df703b4d377efe4d7d29f9`, bundle `0f8114ef5f62ff57da4072726a79bcba3574a17e1144e45b5d76d82fee99af22`. Packaged resources and materialized runtime agree. Later source hardening was not deployed.
+- Active native config is direct OpenAI, with root/default subagent `gpt-6.1-sol` and `multi_agent=true`. SHA-256: `26F47978A82A5D47061A0ACC51649606B35B5C7E40CCE30A36E3C3A0ABF5B027`. Integration journal is installed but inactive. Production port 17841 had no listener. This work must preserve that config and installation.
+- Native desktop backend is 0.159.2; PATH CLI is a separate 0.154.0 installation. Official 0.160.0 was downloaded only into the ignored candidate output for compatibility tests. The desktop update check could not confirm Windows Store eligibility; no update was installed.
+
+## Confirmed causes and changes
+
+The installed launcher repeatedly logged `Browser idle document did not commit within 10000ms`. Startup awaited BrowserHost before starting the supervisor. Early failures bypassed the later runtime-route recovery, and that recovery depended on materialized Bun/runtime CLI assets. A global mixed-root localhost route therefore remained installed without a listener.
+
+The repair keeps the 10-second browser commit deadline, retries the same idle surface up to three times, and records each retry. Browser readiness/authentication proceeds asynchronously. An already-current native passthrough runtime can start independently; browser readiness remains required before connecting Web routing and before capability-dependent upgrades. A browser failure restores native routing.
+
+Journal recovery is now bundled inside the launcher as a Node-compatible module. It runs before runtime materialization and from early fatal/runtime failure paths. A detached hidden Electron Node process watches launcher ownership and bridge health. Launcher death or three consecutive unhealthy checks restores the saved native route; a live successor with fresh supervisor ownership takes over. The handshake must succeed before connecting, and a later watchdog loss prevents subsequent connection attempts. Recovery uses existing transactional journal/config ownership checks, including the recovery mirror; foreign edits are refused rather than overwritten.
+
+Launcher-owned setup preserves the integration journal but disconnects the route until the supervisor and any required browser transition are ready. It then connects and verifies persistence within the existing setup transaction.
+
+Real native smoke tests exposed a second Windows defect: current Codex runs hooks through the session shell, while our commands assumed cmd.exe. The command generator now uses literal arguments in an encoded PowerShell invocation that works from cmd.exe and PowerShell. Real tests include spaces, apostrophes and shell metacharacters. Codex caps Interrupt hooks at three seconds, so the runtime now includes a small interrupt entrypoint that uses the existing config validation and authenticated cancellation endpoint without loading the whole browser CLI. Old journal hook ownership remains compatible; the timeout and trust-hash contract remain unchanged.
+
+Compatible dependency updates remove the audit findings in both lockfiles. Bun 1.4.0, pinned by this repository, is required; the PATH Bun 1.3.14 is unsuitable for validation.
+
+## Upstream and custom behavior
+
+Upstream 6.0–6.1.3 changes include current ChatGPT model/effort controls, reply parsing, prompts, sign-in/account detection, tool connections, Windows broker completion and startup/settings serialization. Overlapping auto-merges were reviewed against upstream and the preserved candidate history. Upstream behavior was retained alongside custom behavior where both apply.
+
+The custom contract remains: 3x Bigger Context semantic capacity; adaptive 2–8 physical chunks; accumulated-context sizing, complete multipart staging and final acknowledgements; revision-preserving native compaction; retained conversation reuse and unfinished-work continuation; ACK/DOM rebind recovery; independence from unrelated hung tabs; correct failure classification; V1 overload recovery; and supervisor/launcher cold-start hardening. These remain covered by the repository tests. No implementation was retired merely because upstream touched its file.
+
+## Routing and current Codex
+
+Current provider selection is task/global configuration, not a documented per-model automatic provider switch. Replacing mixed-root routing with that assumption would jeopardize native-parent/Web-child behavior. The narrow repair retains mixed-root routing and adds independent journal recovery. Native direct routing is the fallback. Changing config cannot revive an already-disconnected HTTP stream; Codex may need its normal retry or a task restart after restoration.
+
+Compatibility V1 remains the default with depth 2. Explicit model overrides and `default_subagent_model` remain supported. Deterministic real-Codex tests cover V1 nesting/depth and V2 lifecycle, Web-only and mixed model combinations; V2 is not promoted based solely on fixtures. Authenticated Web conversations and encrypted payload forms still require live acceptance. The latest catalog puts Astra first as the metadata template while Sol has a higher picker priority. Preserve both native choices and the three reasoning/Pro Web choices in V1's five-slot override roster. All other Web catalog rows remain available; the smoke's obsolete one-native assumption was corrected without rewriting native model priorities.
+
+Relevant primary references: [Codex changelog](https://developers.openai.com/codex/changelog), [config reference](https://developers.openai.com/codex/config-reference), [subagents](https://developers.openai.com/codex/multi-agent), and [0.160.0 source](https://github.com/openai/codex/tree/rust-v0.160.0). The new release improves model catalogs, child environment initialization and reconnect handling; no speculative protocol/provider migration or global Codex update is part of this repair.
+
+## Gates and deployment boundary
+
+Required before promotion: focused regressions; full runtime and launcher suites; both typechecks; version check; dependency audits; diff check; real 0.159.2/0.160.0 catalog, subagent, cancellation and Interrupt smoke tests; clean committed runtime/package builds; runtime release smoke; and isolated packaged Electron smoke including the recovery handshake and matching build provenance. Tests intentionally cover idle commit failure/retry, fatal-to-real-journal restoration, missing listener, corrupt primary journal, owner death, bridge death with a live owner, repeated recovery, healthy retention, foreign edit refusal, and setup readiness ordering.
+
+Final gate results, exact candidate revision, artifact hashes and immutable build provenance are recorded in the candidate's ignored `output/startup-recovery-acceptance.md`. Promote only after material gates pass and a fresh canonical-main compare-and-swap check; push normally, re-fetch, and prove local main equals origin/main. Keep upstream fetch-only.
+
+Production remains 6.1.0 and disconnected. After explicit deployment authorization: use the supported installer/runtime procedure, verify the installed revision equals the accepted candidate, health-check before route connection, then exercise authenticated native/Web models, Bigger Context, retained conversations and routed subagents. A real Windows reboot remains a live acceptance step. Preserve the prior installer/runtime, journal copies and backup refs; journal disconnect restores the saved native route. Do not claim isolated fixtures establish live production acceptance.

@@ -68,6 +68,7 @@ for (const development of [false, true]) for (const interaction of ["manual", "a
       spyOn(configModule, "saveConfig").mockImplementation(value => { saved = value; calls.push("save"); }),
       spyOn(integration, "preflightCodexIntegration").mockImplementation(() => {}),
       spyOn(integration, "installCodexIntegration").mockImplementation(() => { calls.push("integrate"); return {} as never; }),
+      spyOn(integration, "deactivateCodexIntegration").mockImplementation(() => { calls.push("disconnect"); return {} as never; }),
       spyOn(service, "getServiceStatus").mockReturnValue({ installed: false, loaded: false } as never),
       spyOn(service, "removeLegacyRuntimeArtifacts").mockImplementation(() => {}),
       spyOn(tunnelService, "getTunnelServiceStatus").mockReturnValue({ installed: false, loaded: false } as never),
@@ -94,7 +95,7 @@ for (const development of [false, true]) for (const interaction of ["manual", "a
         useSavedChats: true,
         connectorNameSuffix: "Work",
       });
-      expect(calls).toEqual(development ? ["save"] : ["save", "integrate"]);
+      expect(calls).toEqual(development ? ["save"] : ["save", "integrate", "disconnect"]);
       expect(saved?.tunnel?.alias).toBe(`codex-chatgpt-web${development ? "-dev" : ""}${interaction === "manual" ? "-zero-risk" : ""}`);
       expect(result.tunnelReady).not.toBe(true);
       expect(result.connectorSetupRequired).toBe(true);

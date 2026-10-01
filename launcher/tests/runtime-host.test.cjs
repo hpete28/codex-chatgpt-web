@@ -591,11 +591,56 @@ test("launcher connects an inactive installed route", async () => {
   assert.deepEqual(fixture.calls, ["route status", "route connect", "route status"]);
 });
 
+test("setup connects the route only after runtime and browser readiness, and never on failure", async () => {
+  for (const ready of [false, true]) {
+    const fixture = bridgeFixture({ active: false });
+    fixture.host.runtimeConfigSnapshot = () => ({ configured: true, owner: "launcher", config: {} });
+    fixture.host.captureSetupCheckpoint = () => [];
+    fixture.host.restoreSetupCheckpoint = () => {};
+    fixture.host.setupCheckpointChanged = () => false;
+    fixture.host.restorePreviousRuntime = async () => {};
+    const runRoute = fixture.host.run;
+    fixture.host.run = async (name, args, options) => {
+      if (args[0] === "setup") {
+        fixture.calls.push(args.includes("--preflight-only") ? "preflight" : "setup");
+        return { stdout: "" };
+      }
+      return runRoute(name, args, options);
+    };
+    fixture.supervisor.startIfConfigured = async () => {
+      assert.equal(fixture.calls.includes("route connect"), false);
+      fixture.calls.push("runtime:checked");
+      return { status: ready ? "ready" : "failed" };
+    };
+    const promise = fixture.host.runSetup("setup-fixture", ["setup"], {
+      afterRuntimeReady: async () => {
+        assert.equal(fixture.calls.includes("route connect"), false);
+        fixture.calls.push("browser:ready");
+      },
+    });
+    if (ready) {
+      await promise;
+      assert.deepEqual(fixture.calls, ["preflight", "runtime:stop", "setup", "runtime:checked", "browser:ready",
+        "route status", "route connect", "route status"]);
+    } else {
+      await assert.rejects(promise, /runtime is failed/);
+      assert.equal(fixture.calls.includes("route connect"), false);
+    }
+  }
+});
+
 test("launcher leaves an already connected route unchanged", async () => {
   const fixture = bridgeFixture({ active: true });
   const result = await fixture.host.connectBridgeRoute();
   assert.equal(result.active, true);
   assert.deepEqual(fixture.calls, ["route status"]);
+});
+
+test("a lost native route watchdog prevents later setup from reconnecting Codex", async () => {
+  const fixture = bridgeFixture({ active: false });
+  fixture.host.beforeRouteConnect = () => { throw new Error("Native route watchdog is unavailable"); };
+  await assert.rejects(fixture.host.connectBridgeRoute(), /watchdog is unavailable/);
+  assert.deepEqual(fixture.calls, []);
 });
 
 test("bridge connection rejects a route command that did not reach the requested state", async () => {
@@ -902,13 +947,14 @@ test("setup preflight keeps the requested setup budget before stopping the curre
     },
   });
   host.captureSetupCheckpoint = () => [];
+  host.connectBridgeRouteWithinOperation = async () => { events.push("connect"); };
   host.run = async (_name, args, options) => {
     events.push(args.includes("--preflight-only") ? "preflight" : "setup");
     assert.equal(options.timeoutMs, 300_000);
     return { code: 0, stdout: "", stderr: "" };
   };
   await host.runSetup("core-setup", ["setup", "--full"], { timeoutMs: 300_000 });
-  assert.deepEqual(events, ["preflight", "stop", "setup", "start"]);
+  assert.deepEqual(events, ["preflight", "stop", "setup", "start", "connect"]);
 });
 
 test("a browser-mode commit failure restores the previous runtime inside setup", async () => {
@@ -986,6 +1032,7 @@ test("launcher delegates an existing terminal-managed installation to the migrat
     config = { mode: "full", browserHost: "launcher", releaseVersion: "0.2.0" };
     return { code: 0, stdout: "", stderr: "" };
   };
+  host.connectBridgeRouteWithinOperation = async () => {};
 
   await host.runSetup("core-setup", ["setup", "--full"], {});
   assert.equal(prepared, 1);

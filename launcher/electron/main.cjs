@@ -4,7 +4,7 @@ const languages = require("./languages.json");
 const fs = require("node:fs");
 const net = require("node:net");
 const path = require("node:path");
-const { spawnSync } = require("node:child_process");
+const { spawn, spawnSync } = require("node:child_process");
 const { pathToFileURL } = require("node:url");
 const {
   app,
@@ -111,6 +111,38 @@ let catalogVerificationTimer = null;
 let catalogVerificationInFlight = false;
 let updateController = null;
 let limitsController = null;
+let routeRecovery = null;
+let routeWatchdogReady = false;
+
+function startRouteRecovery() {
+  const script = path.join(__dirname, "..", "build", "route-recovery.cjs");
+  routeRecovery = require(script);
+  const child = spawn(process.execPath, [script, "--watch-route", String(process.pid)], {
+    env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
+    detached: true, windowsHide: true, stdio: ["ignore", "ignore", "ignore", "ipc"],
+  });
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      child.kill();
+      reject(new Error("Native route watchdog did not initialize"));
+    }, 5_000);
+    child.once("error", error => { clearTimeout(timeout); reject(error); });
+    child.once("message", message => {
+      clearTimeout(timeout);
+      if (message?.ready !== true) return reject(new Error("Invalid route watchdog readiness"));
+      routeWatchdogReady = true;
+      child.disconnect();
+      child.unref();
+      resolve();
+    });
+    child.once("exit", () => {
+      clearTimeout(timeout);
+      routeWatchdogReady = false;
+      try { routeRecovery.restoreNativeRoute(); } catch {}
+      reject(new Error("Native route watchdog exited"));
+    });
+  });
+}
 
 function findFreePort() {
   return new Promise((resolve, reject) => {
@@ -201,8 +233,8 @@ function startCatalogVerificationMonitor({ logger, stateStore }) {
 
 async function restoreCodexRouteAfterRuntimeFailure({ logger, stateStore }) {
   try {
-    const route = await runtimeHost.restoreBridgeRoute("runtime-start-fail-safe");
-    if (!route.installed || route.active) return { restored: false };
+    const route = routeRecovery.restoreNativeRoute();
+    if (!route.changed) return { restored: false };
     const state = stateStore.update({
       codexCatalogVerified: false,
       codexRestartRequired: true,
@@ -1131,6 +1163,10 @@ async function start() {
   app.on("second-instance", () => showMainWindow());
   app.on("activate", () => showMainWindow());
 
+  if (!IS_DEV_PROFILE) {
+    await startRouteRecovery();
+    await routeRecovery.recoverUnhealthyRoute();
+  }
   await waitForPackagedRuntimeSource({ app, resourcesPath: process.resourcesPath });
   let installedRuntimeRoot = null;
   let runtimeRootResolved = false;
@@ -1235,6 +1271,9 @@ async function start() {
     publishOperation,
     supervisor: runtimeSupervisor,
     getBrowserInteractionMode: () => stateStore.read().browserInteractionMode,
+    beforeRouteConnect: () => {
+      if (!routeWatchdogReady) throw new Error("Native route watchdog is unavailable");
+    },
   });
   const configuredInteractionMode = runtimeHost.runtimeConfigSnapshot().config?.browserInteractionMode;
   if ((configuredInteractionMode === "automatic" || configuredInteractionMode === "manual")
@@ -1259,7 +1298,9 @@ async function start() {
     showWindow: showMainWindow,
     getBrowserInteractionMode: () => stateStore.read().browserInteractionMode,
   });
-  await browserHost.ready();
+  // Capture rejection immediately, while native passthrough starts independently.
+  let browserStartupError = null;
+  const browserStartup = browserHost.ready().catch(error => { browserStartupError = error; });
   const updaterRuntimeRoot = runtimeRootProvider();
   updateController = createUpdateController({
     currentVersion: app.getVersion(),
@@ -1281,7 +1322,9 @@ async function start() {
   const launcherSmokeTest = process.argv.includes("--launcher-smoke-test");
   let startupAuthenticationRefresh = Promise.resolve();
   if (!launcherSmokeTest && stateStore.read().browserInteractionMode === "automatic") {
-    startupAuthenticationRefresh = browserHost.refreshAuthentication().catch((error) => {
+    startupAuthenticationRefresh = browserStartup.then(() => {
+      if (!browserStartupError) return browserHost.refreshAuthentication();
+    }).catch((error) => {
       logger.warn("browser.session_refresh_failed", {
         ...navigationErrorForLog(error),
       });
@@ -1290,6 +1333,8 @@ async function start() {
   await loadRenderer(mainWindow);
   if (!launcherSmokeTest) void updateController.checkOnce();
   if (launcherSmokeTest) {
+    await browserStartup;
+    if (browserStartupError) throw browserStartupError;
     const smokeRuntimeRoot = runtimeRootProvider();
     if (app.isPackaged && !smokeRuntimeRoot) {
       throw new Error("Packaged launcher smoke test could not install its durable runtime");
@@ -1320,6 +1365,7 @@ async function start() {
       platform: process.platform,
       packaged: app.isPackaged,
       runtimeVerified: true,
+      routeRecoveryReady: routeWatchdogReady,
       ...diagnosticBuildSnapshot(),
     })}\n`);
     browserHost.destroy();
@@ -1366,8 +1412,11 @@ async function start() {
       }).finally(finishRuntimeStartup);
     } else finishRuntimeStartup();
   } else void (async () => {
-    await startupAuthenticationRefresh;
-    const upgrade = await runtimeHost.upgradeManagedRuntime();
+    const upgrade = await runtimeHost.upgradeManagedRuntime({ beforeSetup: async () => {
+      await startupAuthenticationRefresh;
+      await browserStartup;
+      if (browserStartupError) throw browserStartupError;
+    } });
     if (upgrade.updated) {
       const state = stateStore.update({
         coreSetupComplete: true,
@@ -1415,6 +1464,10 @@ async function start() {
     }
     const runtime = await runtimeSupervisor.startIfConfigured();
     if (runtime.status !== "ready") return runtime;
+    await startupAuthenticationRefresh;
+    await browserStartup;
+    if (browserStartupError) throw browserStartupError;
+    if (!routeWatchdogReady) throw new Error("Native route watchdog is unavailable");
     const route = await runtimeHost.connectBridgeRoute();
     return { ...runtime, bridgeRouteChanged: route.changed === true };
   })().then(async (runtime) => {
@@ -1511,6 +1564,7 @@ async function start() {
 
 void start().catch(async (error) => {
   startupFailed = true;
+  finishRuntimeStartup();
   const message = error instanceof Error ? error.message : String(error);
   try {
     fs.appendFileSync(path.join(app.getPath("logs"), "launcher-fatal.log"), `${new Date().toISOString()} ${error?.stack || error}\n`);
@@ -1519,6 +1573,10 @@ void start().catch(async (error) => {
     // Browser bootstrap can fail before the renderer is loaded. Keep the error reachable
     // through the existing instance, and release browser resources before a user retry.
     const cleanupErrors = [];
+    if (!IS_DEV_PROFILE && routeRecovery) {
+      try { routeRecovery.restoreNativeRoute(); }
+      catch (caught) { cleanupErrors.push(`Restoring the previous Codex route failed: ${String(caught)}`); }
+    }
     try { browserHost?.destroy(); } catch (caught) { cleanupErrors.push(String(caught)); }
     try { await browserControl?.close(); } catch (caught) { cleanupErrors.push(String(caught)); }
     if (process.argv.includes("--launcher-smoke-test")) return;

@@ -89,13 +89,20 @@ try {
     .toSorted((left, right) => (left.priority ?? Number.MAX_SAFE_INTEGER) - (right.priority ?? Number.MAX_SAFE_INTEGER))
     .slice(0, 5)
     .map(model => model.slug);
+  const nativeSelectable = (sourceCatalog.models as Array<{ slug: string; visibility: string; supported_in_api: boolean; priority?: number }>)
+    .filter(model => model.supported_in_api && model.visibility === "list")
+    .toSorted((left, right) => (left.priority ?? Number.MAX_SAFE_INTEGER) - (right.priority ?? Number.MAX_SAFE_INTEGER));
+  // Current bundled catalogs put Astra first as the template, while Sol has a
+  // higher picker priority. Preserve native rows ahead of or tied with that template.
+  const template = (sourceCatalog.models as Array<{ visibility?: string; supported_reasoning_levels?: unknown; priority?: number }>)
+    .find(model => model.visibility === "list" && Array.isArray(model.supported_reasoning_levels));
+  const leadingNative = nativeSelectable.filter(model => (model.priority ?? Number.MAX_SAFE_INTEGER)
+    <= (template?.priority ?? Number.MAX_SAFE_INTEGER));
   const expectedSpawnOverrides = [
-    (sourceCatalog.models as Array<{ slug: string; visibility: string; supported_in_api: boolean; priority?: number }>)
-      .filter(model => model.supported_in_api && model.visibility === "list")
-      .toSorted((left, right) => (left.priority ?? Number.MAX_SAFE_INTEGER) - (right.priority ?? Number.MAX_SAFE_INTEGER))[0]?.slug,
+    ...leadingNative.map(model => model.slug),
     ...CHATGPT_WEB_MODEL_ROUTES.slice(1).map(route => route.slug),
     "chatgpt-web/gpt-5.6-sol-instant",
-  ];
+  ].slice(0, 5);
   if (JSON.stringify(spawnOverrides) !== JSON.stringify(expectedSpawnOverrides)) {
     throw new Error(`Codex did not preserve the bounded V1 subagent roster: ${JSON.stringify(spawnOverrides)}`);
   }

@@ -65,13 +65,13 @@ mkdirSync(runtimeDir, { recursive: true });
 mkdirSync(binDir, { recursive: true });
 
 const build = await Bun.build({
-  entrypoints: [join(root, "src", "cli.ts")],
+  entrypoints: [join(root, "src", "cli.ts"), join(root, "src", "interrupt-hook.ts")],
   target: "bun",
   minify: true,
   external: ["playwright-core"],
   packages: "external",
   outdir: appDir,
-  naming: "cli.js",
+  naming: "[name].js",
 });
 if (!build.success) {
   throw new Error(`Runtime bundle failed: ${build.logs.map(log => log.message).join("; ")}`);
