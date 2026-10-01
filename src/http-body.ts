@@ -1,3 +1,5 @@
+import { zstdDecompressSync } from "node:zlib";
+
 const MAX_ENCODED_REQUEST_BYTES = 64 * 1024 * 1024;
 const MAX_DECODED_REQUEST_BYTES = 128 * 1024 * 1024;
 
@@ -19,7 +21,9 @@ export async function readJsonRequestBody(request: Request): Promise<unknown> {
   if (contentEncoding === "" || contentEncoding === "identity") {
     decoded = encoded;
   } else if (contentEncoding === "zstd") {
-    decoded = await Bun.zstdDecompress(encoded);
+    // Bun 1.4.0's Bun.zstd* APIs corrupt subsequent Node HTTP stream handling
+    // on Windows. The Node codec passes that regression and bounds allocation.
+    decoded = zstdDecompressSync(encoded, { maxOutputLength: MAX_DECODED_REQUEST_BYTES });
   } else {
     throw new Error(`Unsupported Content-Encoding: ${contentEncoding}`);
   }
