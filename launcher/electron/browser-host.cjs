@@ -48,6 +48,10 @@ const TURN_HEARTBEAT_TIMEOUT_MS = 60_000;
 const TURN_TAB_BOOTSTRAP_TIMEOUT_MS = 120_000;
 const RETAINED_TURN_TAB_TTL_MS = 30 * 60 * 1000;
 const BROWSER_NAVIGATION_TIMEOUT_MS = 60_000;
+const OWNED_SESSION_IDLE_TIMEOUT_MS = 15_000;
+const OWNED_SESSION_COOKIE_FLUSH_TIMEOUT_MS = 15_000;
+const LOGOUT_NAVIGATION_TIMEOUT_MS = BROWSER_NAVIGATION_TIMEOUT_MS + 5_000;
+const LOGOUT_AUTH_PROBE_TIMEOUT_MS = 20_000;
 const CHATGPT_AUTH_SESSION_TIMEOUT_MS = 5_000;
 const WINDOW_VISIBILITY_EVENTS = ["show", "hide", "minimize", "restore"];
 const CHATGPT_BACKEND_REQUEST_FILTER = { urls: [`${CHATGPT_ORIGIN}/backend-api/*`] };
@@ -90,6 +94,32 @@ const CHATGPT_VIEWPORT_CSS = `
 `;
 
 const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+
+function withTimeout(promise, timeoutMs, message, onTimeout) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const timeout = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      try { onTimeout?.(); } catch {}
+      reject(new Error(message));
+    }, timeoutMs);
+    Promise.resolve(promise).then(
+      (value) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        resolve(value);
+      },
+      (error) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        reject(error);
+      },
+    );
+  });
+}
 
 function javaScriptLiteral(value) {
   return JSON.stringify(value).replace(/\u2028/g, "\\u2028").replace(/\u2029/g, "\\u2029");
@@ -2690,11 +2720,25 @@ class BrowserHost {
     if (contents.some(candidate => candidate.session !== browserSession)) {
       throw new Error("Owned ChatGPT views do not share one browser session");
     }
-    await Promise.all(contents.map(candidate => candidate.loadURL(IDLE_BROWSER_URL)));
+    try {
+      await Promise.all(contents.map(candidate => withTimeout(
+        candidate.loadURL(IDLE_BROWSER_URL),
+        this.ownedSessionIdleTimeoutMs ?? OWNED_SESSION_IDLE_TIMEOUT_MS,
+        "Owned ChatGPT browser surface did not return to idle before session cleanup",
+        () => { if (!candidate.isDestroyed()) candidate.stop(); },
+      )));
+    } catch (error) {
+      for (const tab of tabs) this.removeTurnTab(tab, false);
+      throw error;
+    }
+    for (const tab of tabs) this.removeTurnTab(tab, false);
     await browserSession.clearStorageData();
     browserSession.flushStorageData();
-    await browserSession.cookies.flushStore();
-    for (const tab of tabs) this.removeTurnTab(tab, false);
+    await withTimeout(
+      browserSession.cookies.flushStore(),
+      this.ownedSessionCookieFlushTimeoutMs ?? OWNED_SESSION_COOKIE_FLUSH_TIMEOUT_MS,
+      "Owned ChatGPT browser cookie flush timed out after session cleanup",
+    );
   }
 
   async resetFailedPasskeyLogin() {
@@ -2778,6 +2822,7 @@ class BrowserHost {
     return await this.withManualOperation("ChatGPT logout", async () => {
       this.logger.info("browser.logout_started");
       await this.clearOwnedSessionForPasskey();
+      this.logger.info("browser.logout_session_cleared");
       const contents = this.view.webContents;
       this.setState({
         authenticated: false,
@@ -2785,8 +2830,17 @@ class BrowserHost {
         message: "Signing out of ChatGPT",
         status: "loading",
       });
-      await contents.loadURL(TEMPORARY_CHAT_URL);
-      const browser = await this.probeAuthentication();
+      await withTimeout(
+        contents.loadURL(TEMPORARY_CHAT_URL),
+        this.logoutNavigationTimeoutMs ?? LOGOUT_NAVIGATION_TIMEOUT_MS,
+        "ChatGPT logout timed out while reopening Temporary Chat",
+        () => { if (!contents.isDestroyed()) contents.stop(); },
+      );
+      const browser = await withTimeout(
+        this.probeAuthentication(),
+        this.logoutAuthProbeTimeoutMs ?? LOGOUT_AUTH_PROBE_TIMEOUT_MS,
+        "ChatGPT logout timed out while verifying the signed-out session",
+      );
       if (browser.authenticated) {
         throw new Error("ChatGPT session remained authenticated after local session data was cleared");
       }
