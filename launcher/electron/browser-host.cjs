@@ -2776,9 +2776,9 @@ class BrowserHost {
   async logout() {
     requireAutomaticBrowserInspection(this, "Automated ChatGPT logout verification");
     return await this.withManualOperation("ChatGPT logout", async () => {
-      if (this.authView) this.closeAuthView(this.authView, true, false);
+      this.logger.info("browser.logout_started");
+      await this.clearOwnedSessionForPasskey();
       const contents = this.view.webContents;
-      await contents.session.clearStorageData();
       this.setState({
         authenticated: false,
         loading: true,

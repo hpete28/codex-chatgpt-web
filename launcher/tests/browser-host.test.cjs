@@ -1496,6 +1496,7 @@ test("logout clears only the owned ChatGPT session and returns to the sign-in su
       calls.push(["closeAuthView", view, closeContents, refreshMain]);
       this.authView = null;
     },
+    clearOwnedSessionForPasskey: async () => calls.push(["clearOwnedSessionForPasskey"]),
     setState(patch) {
       this.state = { ...this.state, ...patch };
       calls.push(["setState", patch]);
@@ -1520,9 +1521,13 @@ test("logout clears only the owned ChatGPT session and returns to the sign-in su
   assert.equal(result.authenticated, false);
   assert.equal(result.status, "signed-out");
   assert.deepEqual(calls[0], ["manualOperation", "ChatGPT logout"]);
-  assert.deepEqual(calls[1], ["closeAuthView", authView, true, false]);
-  assert.deepEqual(calls[2], ["clearStorageData"]);
-  assert.deepEqual(calls[4], ["loadURL", "https://chatgpt.com/?temporary-chat=true"]);
+  const clearOwnedIndex = calls.findIndex(([name]) => name === "clearOwnedSessionForPasskey");
+  const signInLoadIndex = calls.findIndex(([name, url]) => (
+    name === "loadURL" && url === "https://chatgpt.com/?temporary-chat=true"
+  ));
+  assert.ok(clearOwnedIndex > 0);
+  assert.ok(signInLoadIndex > clearOwnedIndex);
+  assert.equal(calls.some(([name]) => name === "clearStorageData"), false);
   assert.ok(calls.some(([name]) => name === "activateHomeSurface"));
   assert.ok(calls.some(([name]) => name === "show"));
 });
