@@ -20,6 +20,30 @@ const grandId = "33333333-3333-4333-8333-333333333333";
 const turnId = "44444444-4444-4444-8444-444444444444";
 const resumedTurnId = "55555555-5555-4555-8555-555555555555";
 
+test("mixed-root WebSocket probes negotiate HTTP without forwarding or weakening inference authorization", async () => {
+  const config = defaultConfig("browser-only");
+  config.port = 0;
+  let forwarded = 0;
+  let adapted = 0;
+  const server = startServer(config, {
+    fetchUpstream: async () => { forwarded++; return Response.json({ native: true }); },
+    adapterFactory: () => { adapted++; throw new Error("probe must not execute a turn"); },
+  });
+  const url = `http://127.0.0.1:${server.port}/mixed-root/v1/responses`;
+  try {
+    const probe = await fetch(url, { headers: { authorization: "Bearer local-native-test", upgrade: "websocket", connection: "Upgrade" } });
+    expect(probe.status).toBe(426);
+    expect(await probe.text()).toContain("WebSocket transport is not enabled");
+    expect((await fetch(url)).status).toBe(403);
+    expect((await fetch(url, { method: "POST", headers: { authorization: "Bearer local-native-test", "content-type": "application/json" }, body: "{}" })).status).toBe(400);
+    expect((await fetch(`${url}/unsupported`, { headers: { authorization: "Bearer local-native-test" } })).status).toBe(403);
+    expect(forwarded).toBe(0);
+    expect(adapted).toBe(0);
+  } finally {
+    await server.stop(true);
+  }
+});
+
 function fixture() {
   const home = mkdtempSync(join(tmpdir(), "mixed-root-policy-"));
   const sessions = join(home, "sessions", "2026", "09", "23");

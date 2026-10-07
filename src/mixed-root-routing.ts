@@ -20,6 +20,9 @@ export async function mixedRootRequestPolicy(req: Request, config: AppConfig): P
   }
   const endpoint = path.slice("/mixed-root".length);
   if (req.method === "GET" && endpoint === "/v1/models") return { protected: true };
+  // No inference occurs here: the shared Responses handler returns 426 so Codex
+  // switches immediately to HTTP instead of retrying an unsupported WebSocket five times.
+  if (req.method === "GET" && endpoint === "/v1/responses") return { protected: true };
   if (req.method !== "POST" || (endpoint !== "/v1/responses" && endpoint !== "/v1/responses/compact")) {
     return { protected: true, rejection: reject("Endpoint is unavailable on the mixed-root route", 403) };
   }
