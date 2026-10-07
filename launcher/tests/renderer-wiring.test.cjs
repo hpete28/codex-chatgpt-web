@@ -272,17 +272,19 @@ test("startup failure stays visible on another launch and Retry exits the failed
   assert.deepEqual(sandbox.process.env, { CODEX_HOME: "original-codex-home" });
 });
 
-test("packaged runtime is verified before launcher browser surfaces can bind ports", () => {
+test("debugging is configured early while browser surfaces wait for runtime verification", () => {
   const start = electronMain.indexOf("async function start()");
   const runtimeValidation = electronMain.indexOf("installedRuntimeRoot = runtimeRootProvider();", start);
-  const cdpPortAllocation = electronMain.indexOf("cdpPort = await findFreePort();", start);
+  const cdpConfiguration = electronMain.indexOf("const browserDebugging = configureBrowserDebugging(");
+  const cdpPortAllocation = electronMain.indexOf("cdpPort = await waitForBrowserDebugging(", start);
   const windowCreation = electronMain.indexOf("mainWindow = createWindow({", start);
   const controlServerStart = electronMain.indexOf("browserControl = await new BrowserControlServer({", start);
   const browserReady = electronMain.indexOf("const browserStartup = browserHost.ready()", start);
 
   assert.ok(runtimeValidation > start, "startup must eagerly verify the packaged runtime");
+  assert.ok(cdpConfiguration >= 0 && cdpConfiguration < start, "Chromium switches must be set before async startup");
   for (const [surface, position] of [
-    ["CDP port allocation", cdpPortAllocation],
+    ["CDP readiness verification", cdpPortAllocation],
     ["launcher window", windowCreation],
     ["browser control server", controlServerStart],
     ["embedded browser", browserReady],

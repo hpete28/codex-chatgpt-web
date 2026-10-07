@@ -2,7 +2,6 @@ const { configureWindowsTrust } = require("./windows-trust.cjs");
 configureWindowsTrust();
 const languages = require("./languages.json");
 const fs = require("node:fs");
-const net = require("node:net");
 const path = require("node:path");
 const { spawn, spawnSync } = require("node:child_process");
 const { pathToFileURL } = require("node:url");
@@ -19,6 +18,7 @@ const {
   shell,
   Tray,
 } = require("electron");
+const { configureBrowserDebugging, waitForBrowserDebugging } = require("./browser-debugging.cjs");
 const { BrowserHost, navigationErrorForLog } = require("./browser-host.cjs");
 const { BrowserControlServer } = require("./control-server.cjs");
 const { LimitsController } = require("./limits-controller.cjs");
@@ -83,6 +83,7 @@ const launcherUserData = LAUNCHER_PROFILE.userData;
 fs.mkdirSync(launcherUserData, { recursive: true, mode: 0o700 });
 if (process.platform !== "win32") fs.chmodSync(launcherUserData, 0o700);
 app.setPath("userData", launcherUserData);
+const browserDebugging = configureBrowserDebugging(app, launcherUserData);
 app.setAppLogsPath(path.join(launcherUserData, "logs"));
 installProcessDiagnosticGuards({
   filePath: path.join(launcherUserData, "logs", "process-stream-errors.log"),
@@ -140,19 +141,6 @@ function startRouteRecovery() {
       routeWatchdogReady = false;
       try { routeRecovery.restoreNativeRoute(); } catch {}
       reject(new Error("Native route watchdog exited"));
-    });
-  });
-}
-
-function findFreePort() {
-  return new Promise((resolve, reject) => {
-    const server = net.createServer();
-    server.unref();
-    server.once("error", reject);
-    server.listen(0, "127.0.0.1", () => {
-      const address = server.address();
-      const port = address && typeof address === "object" ? address.port : 0;
-      server.close((error) => error ? reject(error) : resolve(port));
     });
   });
 }
@@ -1185,14 +1173,12 @@ async function start() {
   };
   installedRuntimeRoot = runtimeRootProvider();
 
-  cdpPort = await findFreePort();
   if (process.platform === "linux") {
     app.commandLine.appendSwitch("class", IS_DEV_PROFILE ? "codex-web-gpt-dev" : "codex-web-gpt");
   }
-  app.commandLine.appendSwitch("remote-debugging-address", "127.0.0.1");
-  app.commandLine.appendSwitch("remote-debugging-port", String(cdpPort));
 
   await app.whenReady();
+  cdpPort = await waitForBrowserDebugging(browserDebugging);
 
   const stateStore = createStateStore(path.join(app.getPath("userData"), "launcher-state.json"));
   limitsController = new LimitsController(path.join(app.getPath("userData"), "limits.json"), {
