@@ -12,7 +12,7 @@ test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)(`model selection reuses the $
     await page.setContent(`<form><div id="prompt-textarea" contenteditable="true">Draft</div>
       <button type="button" data-tone="neutral" aria-haspopup="menu" aria-controls="picker" aria-expanded="false">Extra High</button></form>
       <div id="picker" role="menu" hidden><div ${modern ? 'data-model-picker-view="simple"' : ''}>
-        <div id="toggle" role="menuitem" aria-hidden="false" aria-expanded="false" data-model-picker-view-toggle="true">Select model</div>
+        <div id="toggle" role="menuitem" aria-expanded="false" data-model-picker-view-toggle="true">Select model</div>
         <div id="models" hidden><div role="menuitemradio" aria-checked="true">Latest</div>
           <div role="menuitemradio" aria-checked="false">GPT-5.6 Sol</div></div>
         <span id="announcement">5.6 Extra High, 4 of 4.</span>
