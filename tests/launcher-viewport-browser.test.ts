@@ -20,6 +20,9 @@ test.skipIf(!process.env.LAUNCHER_TEST_ELECTRON)("finishing another Electron tab
     expect(await app.evaluate(() => Boolean((globalThis as any).viewportFixture))).toBe(true);
     const page = app.context().pages().find(page => page.url().endsWith("#first"))!;
     expect(page).toBeDefined();
+    // Match connectLauncherBrowserHost's owned-page input setup while the tab is hidden.
+    const inputSession = await app.context().newCDPSession(page);
+    await inputSession.send("Emulation.setFocusEmulationEnabled", { enabled: true });
     const dimensions = () => page.evaluate(() => [innerWidth, innerHeight]);
     // Include the launcher's user zoom: native and emulated dimensions must agree in CSS pixels.
     for (const zoom of [1, 1.25]) {

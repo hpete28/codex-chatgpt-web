@@ -94,7 +94,9 @@ test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)("a selected connector never a
     const worker = Object.assign(Object.create(ChatGptBrowserWorker.prototype), {
       config: { appName: "Codex Native2" },
     });
-    const prompt = "Task context\n".repeat(5_000) + "\nrequest_id: current";
+    // Inserting thousands of paragraphs can exceed the fixture's budget in Chromium.
+    // This case tests replacement of a stale draft; transport limits have separate coverage.
+    const prompt = "Task context\n".repeat(500) + "\nrequest_id: current";
     for (const modern of [false, true]) {
       const pill = modern
         ? '<span app-mention-path="app://fixture" app-mention-display-name="Codex Native2" contenteditable="false">Codex Native2</span>'
