@@ -3928,7 +3928,7 @@ describe("ChatGPT outer-native harness v4", () => {
     environment.tools = [
       { name: "exec_command", description: "Run a Codex command", parameters: { type: "object" } },
     ];
-    const abandonedToken = await broker.register(environment, 3_000);
+    let abandonedToken: string | undefined;
     const replacementToken = await broker.register(environment);
     const transport = new StdioClientTransport({
       command: process.execPath,
@@ -3942,6 +3942,8 @@ describe("ChatGPT outer-native harness v4", () => {
       expect(chatGptMcpInvocationTimeout(environment)).toBe(CHATGPT_WEB_MCP_INVOCATION_TIMEOUT_MS);
       expect(chatGptMcpInvocationTimeout({ ...environment, expiresAt: 1_500 }, 1_000)).toBe(500);
       await client.connect(transport);
+      // Exercise cancellation with a live capability, independent of cold MCP startup time.
+      abandonedToken = await broker.register(environment, 3_000);
       const abort = new AbortController();
       const abandoned = client.callTool({
         name: "codex_exec",
@@ -3975,7 +3977,7 @@ describe("ChatGPT outer-native harness v4", () => {
       });
     } finally {
       await client.close().catch(() => {});
-      broker.revoke(abandonedToken);
+      if (abandonedToken) broker.revoke(abandonedToken);
       broker.revoke(replacementToken);
       await broker.close();
     }

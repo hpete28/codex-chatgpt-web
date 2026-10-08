@@ -130,9 +130,10 @@ test("startup waits beyond five seconds and distinguishes its deadline from call
   const pendingHandlers = new Set<Promise<void>>();
   let thirdStarted!: () => void;
   const thirdRequest = new Promise<void>(resolve => { thirdStarted = resolve; });
-  const server = await controlFixture(async () => {
+  const server = await controlFixture(async req => {
     calls++;
-    if (calls === 3) thirdStarted();
+    const activity = await req.json() as { traceId: string };
+    if (activity.traceId === "caller-cancelled-start") thirdStarted();
     const delay = Bun.sleep(calls === 1 ? 5_100 : 250);
     pendingHandlers.add(delay);
     await delay;
@@ -145,11 +146,12 @@ test("startup waits beyond five seconds and distinguishes its deadline from call
     await expect(notifyLauncherTurn(descriptor, activity)).resolves.toMatchObject({ reused: false });
     await expect(notifyLauncherTurn(descriptor, activity, 50)).rejects.toThrow("start timed out after 50ms");
     const controller = new AbortController();
-    const pending = notifyLauncherTurn(descriptor, activity, undefined, controller.signal);
+    const pending = notifyLauncherTurn(descriptor, { ...activity, traceId: "caller-cancelled-start" }, undefined, controller.signal);
     await thirdRequest;
     controller.abort();
     await expect(pending).rejects.toMatchObject({ name: "AbortError" });
-    expect(calls).toBe(3);
+    // Under load the 50ms deadline can expire before its request reaches the fixture.
+    expect(calls).toBeGreaterThanOrEqual(2);
   } finally {
     // Cancelled clients do not cancel the fixture's handler. Drain it before
     // stopping Bun's server; destroying it during the delay corrupts subsequent
