@@ -24,8 +24,8 @@ function runCodex(args: string[], env = process.env): { stdout: string; stderr: 
 
 const bundled = runCodex(["debug", "models", "--bundled"]);
 const sourceCatalog = JSON.parse(bundled.stdout) as { models?: unknown[] };
-if (!sourceCatalog.models?.some(model => model && typeof model === "object" && (model as { slug?: string }).slug === "gpt-5.6-sol")) {
-  throw new Error("Bundled Codex catalog has no gpt-5.6-sol template");
+if (!sourceCatalog.models?.some(model => model && typeof model === "object" && (model as { slug?: string }).slug === "gpt-6.1-sol")) {
+  throw new Error("Bundled Codex catalog has no gpt-6.1-sol template");
 }
 
 const root = join(tmpdir(), `codex-chatgpt-web-codex-smoke-${process.pid}-${Date.now()}`);
@@ -72,7 +72,7 @@ try {
   if (JSON.stringify(actual) !== JSON.stringify(expected)) {
     throw new Error(`Codex did not preserve the grouped and legacy ChatGPT Web model contract: ${JSON.stringify(actual)}`);
   }
-  const nativeSol = catalog.models?.find(model => model.slug === "gpt-5.6-sol");
+  const nativeSol = catalog.models?.find(model => model.slug === "gpt-6.1-sol");
   const webPro = catalog.models?.find(model => model.slug === "chatgpt-web/pro");
   if (nativeSol?.multi_agent_version !== "v1" || webPro?.multi_agent_version !== "v1") {
     throw new Error(
@@ -100,7 +100,10 @@ try {
     <= (template?.priority ?? Number.MAX_SAFE_INTEGER));
   const expectedSpawnOverrides = [
     ...leadingNative.map(model => model.slug),
-    ...CHATGPT_WEB_MODEL_ROUTES.slice(1).map(route => route.slug),
+    ...CHATGPT_WEB_MODEL_ROUTES.filter(route => route.modelFamily === "6" && route.adapterEffort !== "low").map(route => route.slug),
+    ...nativeSelectable.filter(model => (model.priority ?? Number.MAX_SAFE_INTEGER)
+      === (template?.priority ?? Number.MAX_SAFE_INTEGER) + 1).map(model => model.slug),
+    ...CHATGPT_WEB_MODEL_ROUTES.filter(route => route.modelFamily === "5.6" && route.adapterEffort !== "low").map(route => route.slug),
     "chatgpt-web/gpt-5.6-sol-instant",
   ].slice(0, 5);
   if (JSON.stringify(spawnOverrides) !== JSON.stringify(expectedSpawnOverrides)) {

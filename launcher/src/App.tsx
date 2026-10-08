@@ -16,6 +16,7 @@ import { Icon, type IconName } from "./icons";
 import { LimitsSurface } from "./LimitsSurface";
 import { limitsCopyFor } from "./limits-copy";
 import { useLimits } from "./useLimits";
+import { describeTurnActivity } from "./turn-activity";
 import type {
   BuildInfo,
   BrowserInteractionMode,
@@ -367,6 +368,7 @@ function LauncherShell({
   const [biggerContextRecommendationOpen, setBiggerContextRecommendationOpen] = useState(
     snapshot.state.browserInteractionMode === "automatic"
       && snapshot.state.coreSetupComplete === true
+      && snapshot.state.biggerContextAvailable === true
       && !snapshot.state.experimentalBiggerContext,
   );
   const [biggerContextRecommendationBusy, setBiggerContextRecommendationBusy] = useState(false);
@@ -384,14 +386,15 @@ function LauncherShell({
   const updateBusy = snapshot.update.status === "downloading" || snapshot.update.status === "installing";
   const updateVersion = "version" in snapshot.update ? snapshot.update.version : null;
   const selectedManualTab = browser?.tabs.find(tab => tab.active && tab.interactionMode === "manual");
+  const approvalTabs = browser?.tabs.filter(tab => tab.status === "running" && tab.approvalPending) ?? [];
   const limits = useLimits(api!, snapshot.state.browserInteractionMode === "manual");
   const limitsCopy = limitsCopyFor(language);
 
   useEffect(() => {
-    if (snapshot.state.browserInteractionMode === "manual") {
+    if (snapshot.state.browserInteractionMode === "manual" || snapshot.state.biggerContextAvailable !== true) {
       setBiggerContextRecommendationOpen(false);
     }
-  }, [snapshot.state.browserInteractionMode]);
+  }, [snapshot.state.browserInteractionMode, snapshot.state.biggerContextAvailable]);
 
   useEffect(() => {
     if (!selectedManualTab) return;
@@ -660,6 +663,21 @@ function LauncherShell({
       </motion.aside>
 
       <section className="workspace">
+        {approvalTabs.map(tab => (
+          <div className="tool-approval-notice" key={tab.id} role="status">
+            <Icon name="alert" />
+            <div>
+              <strong>{copy.toolApprovalNeeded} · {browserTabTitleFromTitle(tab.title, copy)}</strong>
+              <p>{copy.toolApprovalPendingBody}</p>
+            </div>
+            <SecondaryButton onClick={() => {
+              navigateSurface("browser");
+              setBiggerContextRecommendationOpen(false);
+              void api!.selectBrowserTab(tab.id).then(() => activateBrowser(true))
+                .catch(cause => setError(messageOf(cause)));
+            }}>{copy.openChatgpt}</SecondaryButton>
+          </div>
+        ))}
         <AnimatePresence mode="wait" initial={false}>
           <motion.div
             animate={{ opacity: 1 }}
@@ -713,13 +731,13 @@ function LauncherShell({
               />
             ) : null}
             {surface === "activity" ? (
-              <ActivitySurface
-                copy={copy}
-                language={language}
-                logs={logs}
-                setError={setError}
-                turnObservations={turnObservations}
-              />
+              <ActivitySurface copy={copy} language={language} logs={logs} browser={browser} turnObservations={turnObservations} setError={setError}
+                openTab={async id => {
+                  await api!.selectBrowserTab(id);
+                  navigateSurface("browser");
+                  setBiggerContextRecommendationOpen(false);
+                  await activateBrowser(true);
+                }} />
             ) : null}
             {surface === "limits" ? (
               <LimitsSurface
@@ -1574,12 +1592,16 @@ function ActivitySurface({
   copy,
   language,
   logs,
+  browser,
+  openTab,
   setError,
   turnObservations,
 }: {
   copy: Copy;
   language: Language;
   logs: LogRecord[];
+  browser: BrowserState | null;
+  openTab: (id: string) => Promise<void>;
   setError: (error: string | null) => void;
   turnObservations: TurnObservation[];
 }) {
@@ -1610,8 +1632,48 @@ function ActivitySurface({
     ? humanEvent(selectedObservation.phase)
     : copy.unavailable;
 
+  const [now, setNow] = useState(Date.now);
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 1_000);
+    return () => clearInterval(timer);
+  }, []);
+  const states = {
+    preparing: copy.activityPreparing, sending: copy.activitySending, chatgpt: copy.activityChatgpt,
+    tools: copy.activityTools, approval: copy.activityApproval, unknown: copy.activityUnknown,
+    stale: copy.activityStale, "sign-in": copy.stepAccount,
+  };
+  const tasks = (browser?.tabs ?? []).flatMap(tab => {
+    const activity = describeTurnActivity(tab, now);
+    return activity ? [{ tab, activity }] : [];
+  });
+  const duration = (ms: number) => {
+    const seconds = Math.floor(ms / 1_000);
+    return seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+  };
   return (
     <ContentSurface subtitle={copy.activitySubtitle} title={copy.activityTitle}>
+      {tasks.length > 0 ? (
+        <section className="activity-tasks" aria-label={copy.activityTasks}>
+          <div className="section-heading"><span>{copy.activityTasks}</span></div>
+          {tasks.map(({ tab, activity }) => (
+            <article className="activity-task" key={tab.id}>
+              <StateDot state={activity.state === "sign-in" ? "error" : ["unknown", "stale"].includes(activity.state) ? "idle" : "busy"} />
+              <div className="activity-task-detail">
+                <span className="activity-task-title">{browserTabTitleFromTitle(tab.title, copy)}</span>
+                <strong>{states[activity.state]}</strong>
+                <span className="activity-task-time">
+                  {activity.elapsedMs !== null && activity.state !== "unknown"
+                    ? copy.activityElapsed.replace("{time}", duration(activity.elapsedMs))
+                    : activity.ageMs !== null ? copy.activityObserved.replace("{time}", duration(activity.ageMs)) : null}
+                </span>
+              </div>
+              <SecondaryButton onClick={() => void openTab(tab.id).catch(cause => setError(messageOf(cause)))}>
+                {copy.openChatgpt}
+              </SecondaryButton>
+            </article>
+          ))}
+        </section>
+      ) : null}
       <div className="turn-observation-panel">
         <div className="turn-observation-selector">
           <label htmlFor="turn-observation-select">{copy.observedTurn}</label>
@@ -1806,6 +1868,17 @@ function SettingsSurface({
       setBusy(false);
     }
   };
+  const setAutoApproveToolCalls = async (enabled: boolean) => {
+    setBusy(true);
+    setError(null);
+    try {
+      updateState(await api!.setAutoApproveToolCalls(enabled));
+    } catch (cause) {
+      setError(messageOf(cause));
+    } finally {
+      setBusy(false);
+    }
+  };
   const setFreshConversationPerTurn = async (enabled: boolean) => {
     setBusy(true);
     setError(null);
@@ -1920,6 +1993,8 @@ function SettingsSurface({
         <SettingRow
           body={snapshot.state.browserInteractionMode === "manual"
             ? copy.manualBiggerContextUnavailable
+            : snapshot.state.biggerContextAvailable === false
+            ? copy.lunaBiggerContextUnavailable
             : copy.biggerContextBody}
           label={copy.biggerContext}
         >
@@ -1927,6 +2002,7 @@ function SettingsSurface({
             checked={snapshot.state.experimentalBiggerContext}
             disabled={busy
               || snapshot.state.browserInteractionMode === "manual"
+              || (snapshot.state.biggerContextAvailable !== true && !snapshot.state.experimentalBiggerContext)
               || snapshot.state.coreSetupComplete !== true}
             onChange={(checked) => void setBiggerContext(checked)}
           />
@@ -1945,6 +2021,14 @@ function SettingsSurface({
             checked={snapshot.state.experimentalFreshConversationPerTurn}
             disabled={busy || snapshot.state.browserInteractionMode === "manual" || snapshot.state.coreSetupComplete !== true}
             onChange={(checked) => void setFreshConversationPerTurn(checked)}
+          />
+        </SettingRow>
+        <SettingRow body={snapshot.state.browserInteractionMode === "manual"
+          ? copy.manualAutoApproveUnavailable : copy.autoApproveToolsBody} label={copy.autoApproveTools}>
+          <Switch
+            checked={snapshot.state.browserInteractionMode !== "manual" && snapshot.state.autoApproveToolCalls}
+            disabled={busy || snapshot.state.browserInteractionMode === "manual" || !snapshot.state.coreSetupComplete}
+            onChange={(checked) => void setAutoApproveToolCalls(checked)}
           />
         </SettingRow>
         <SettingRow body={copy.savedChatsBody} label={copy.savedChats}>

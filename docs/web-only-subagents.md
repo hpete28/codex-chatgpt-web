@@ -94,7 +94,7 @@ In a **candidate** bridge home's `config.json`, add:
 ```json
 "webOnlySubagents": {
   "token": "cw-web-only-<64 lowercase hex characters from 32 cryptographically random bytes>",
-  "defaultModel": "chatgpt-web/high"
+  "defaultModel": "chatgpt-web/gpt-6-sol"
 }
 ```
 
@@ -112,7 +112,7 @@ Prepare an isolated Codex home with a dedicated provider and no copied native
 auth file. Point it at the candidate listener, for example:
 
 ```toml
-model = "chatgpt-web/high"
+model = "chatgpt-web/gpt-6-sol"
 model_provider = "web_only"
 model_catalog_json = "/absolute/path/to/web-only-models.json"
 

@@ -3,10 +3,13 @@ import { estimateTokens } from "../../lib/token-estimate";
 import {
   CHATGPT_WEB_BACKEND_MODEL,
   CHATGPT_WEB_BIGGER_CONTEXT_MULTIPLIER,
+  CHATGPT_WEB_LUNA_BIGGER_CONTEXT_ERROR,
   isChatGptWebZeroRiskBackendModel,
   resolveChatGptWebContextLimits,
   resolveChatGptWebMessageTokenBudget,
+  resolveChatGptWebStagingTokenBudget,
   resolveChatGptWebTransportLimits,
+  supportsChatGptWebBiggerContext,
 } from "../../chatgpt-web-models";
 import type { CodexParsedRequest, CodexUsage } from "../../types";
 import { compiledChatGptWebMessages, estimateChatGptWebImageTokens, estimateCompiledChatGptWebInputTokens } from "./input-tokens";
@@ -77,9 +80,10 @@ export function resolveBiggerContextMultipartParts(
     throw new Error("Bigger Context is unavailable for ChatGPT Zero Risk");
   }
   if (parsed.modelId === CHATGPT_WEB_LUNA_MODEL_ID) {
-    throw new Error("Bigger Context is unavailable for Luna because its accumulated browser transcript still shares one 28,000-token transport budget");
+    throw new Error(CHATGPT_WEB_LUNA_BIGGER_CONTEXT_ERROR);
   }
   const mode = resolveChatGptWebModelMode(parsed.modelId, parsed.options.reasoning, capabilities);
+  if (!supportsChatGptWebBiggerContext(parsed.modelId, mode.effort, capabilities, parsed._chatgptModelFamily)) return undefined;
   const { contextWindow, autoCompactTokenLimit } = resolveChatGptWebContextLimits(
     CHATGPT_WEB_BACKEND_MODEL,
     mode.effort,
@@ -108,15 +112,16 @@ export function resolveBiggerContextMultipartParts(
       const effort = final ? mode.effort : stagingEffort;
       const { browserComposerCharLimit } = resolveChatGptWebTransportLimits(CHATGPT_WEB_BACKEND_MODEL, effort, capabilities);
       if (browserComposerCharLimit !== undefined && text.length > browserComposerCharLimit) return false;
-      const budget = resolveChatGptWebMessageTokenBudget(
-        CHATGPT_WEB_BACKEND_MODEL, effort, capabilities, final ? estimateChatGptWebImageTokens(compiled) + skillFileTokens(compiled.skillFiles, parsed.modelId) : 0,
-      );
+      const budget = final ? resolveChatGptWebMessageTokenBudget(
+        CHATGPT_WEB_BACKEND_MODEL, effort, capabilities, estimateChatGptWebImageTokens(compiled) + skillFileTokens(compiled.skillFiles, parsed.modelId),
+      ) : resolveChatGptWebStagingTokenBudget(CHATGPT_WEB_BACKEND_MODEL, effort, capabilities);
       if (estimateTokens(text, parsed.modelId) > budget) return false;
     }
     // Extra transport messages only reduce per-message ingestion pressure. Bigger Context remains
     // a fixed 3x context experiment regardless of how many inert acknowledgements carry it.
     return estimateCompiledChatGptWebInputTokens(compiled, parsed.modelId)
-      < contextWindow * CHATGPT_BIGGER_CONTEXT_PARTS;
+      < resolveChatGptWebContextLimits(CHATGPT_WEB_BACKEND_MODEL, mode.effort,
+        { ...capabilities, experimentalBiggerContext: true }, parsed._chatgptModelFamily).contextWindow;
   };
   const widestStagingEffort = capabilities.proAvailable ? "max" : "medium";
   if (initialParts === undefined && fits(inline!, widestStagingEffort)) return undefined;
@@ -130,6 +135,12 @@ export function resolveBiggerContextMultipartParts(
   for (let candidate = CHATGPT_BIGGER_CONTEXT_PARTS; candidate <= CHATGPT_BIGGER_CONTEXT_MAX_TRANSPORT_PARTS; candidate += 1) {
     if (!isChatGptWebMultipartPartCount(candidate)) continue;
     if (fits(compile(candidate), "low")) return candidate;
+  }
+  // Instant's safer upload headroom may be too small for the full 3x window.
+  // Keep smaller physical stages at the widest retaining mode in that case.
+  if (initialParts === CHATGPT_BIGGER_CONTEXT_PARTS
+    && fits(compile(CHATGPT_BIGGER_CONTEXT_MAX_TRANSPORT_PARTS), widestStagingEffort)) {
+    return CHATGPT_BIGGER_CONTEXT_MAX_TRANSPORT_PARTS;
   }
   return CHATGPT_BIGGER_CONTEXT_PARTS;
 }

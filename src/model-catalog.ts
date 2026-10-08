@@ -48,12 +48,14 @@ function routedModelPriority(
   const priority = modelPriority(template);
   if (priority === undefined
     || config.subagentProtocol !== "compatibility-v1"
-    || !["chatgpt-web/light", "chatgpt-web/gpt-5.6-sol-instant"].includes(route.slug)) return priority;
+    || !((route.interactionMode === "automatic" && route.modelFamily === "5.6")
+      || ["chatgpt-web/light", "chatgpt-web/gpt-6-sol-instant"].includes(route.slug))) return priority;
   if (priority === Number.MAX_SAFE_INTEGER) {
     throw new Error("Native Codex model template priority cannot reserve the Compatibility V1 roster");
   }
-  // Preserve the native model and the reasoning/Pro choices in Codex V1's bounded registry.
-  return priority + 1;
+  // Keep native choices and GPT-6 reasoning/Pro in V1's five-slot override registry.
+  // GPT-5.6 remains selectable for existing chats without displacing GPT-6 subagents.
+  return priority + (route.interactionMode === "automatic" && route.adapterEffort === "low" ? 2 : 1);
 }
 
 function nativeTemplateCandidate(value: unknown, requireTools: boolean): value is JsonObject {
@@ -103,12 +105,13 @@ export function buildChatGptWebModel(
   if (!templateSlug || templateSlug.startsWith(CHATGPT_WEB_MODEL_PREFIX)) {
     throw new Error("ChatGPT Web model template must be a native Codex model");
   }
-  const limits = resolveChatGptWebContextLimits(route.backendModel, route.adapterEffort, config);
+  const modelFamily = route.interactionMode === "automatic" ? route.modelFamily : undefined;
+  const limits = resolveChatGptWebContextLimits(route.backendModel, route.adapterEffort, config, modelFamily);
   const efforts = chatGptWebRouteEfforts(route, config);
   for (const effort of efforts) {
     const adapterEffort = route.supportedCodexEfforts ? effort : route.adapterEffort;
     if (adapterEffort === "ultra") throw new Error("Ultra is not a browser effort");
-    const candidate = resolveChatGptWebContextLimits(route.backendModel, adapterEffort, config);
+    const candidate = resolveChatGptWebContextLimits(route.backendModel, adapterEffort, config, modelFamily);
     if (JSON.stringify(candidate) !== JSON.stringify(limits)) {
       throw new Error(`Cannot group different context budgets under ${route.slug}`);
     }

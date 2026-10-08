@@ -50,7 +50,7 @@ async function* final(text: string): AsyncGenerator<AdapterEvent> {
 const server = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(req) {
   if (new URL(req.url).pathname !== "/web-only/v1/responses") return new Response("not found", { status: 404 });
   const body = await req.json() as any;
-  if (body.model !== "chatgpt-web/high") {
+  if (body.model !== "chatgpt-web/gpt-6-sol") {
     rejectedNativeRequests++;
     failures.push(`Native/unapproved execution attempted: ${body.model}`);
     return webOnlyModelRejection(req, cfg, body.model)!;
@@ -64,7 +64,7 @@ const server = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(req) {
   } else {
     const outputs = (body.input ?? []).filter((item: any) => item.type === "function_call_output");
     const latest = outputs.at(-1)?.output ?? "";
-    if (step === 0) events = call("spawn_agent", { message: "native attempt", model: "gpt-5.6-sol" });
+    if (step === 0) events = call("spawn_agent", { message: "native attempt", model: "gpt-6.1-sol" });
     else if (step === 1) {
       if (!latest.includes("Web-only subagents")) failures.push(`Native spawn was not denied by hook: ${latest}`);
       if (childRequests !== 0) failures.push("Child executed before policy denial");
@@ -79,11 +79,11 @@ const server = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(req) {
     }
     step++;
   }
-  return new Response(bridgeToResponsesSSE(events, "chatgpt-web/high", map), { headers: { "content-type": "text/event-stream" } });
+  return new Response(bridgeToResponsesSSE(events, "chatgpt-web/gpt-6-sol", map), { headers: { "content-type": "text/event-stream" } });
 } });
 const configPath = join(codexHome, "config.toml");
 writeFileSync(configPath, [
-  'model = "chatgpt-web/high"', 'model_provider = "mock"',
+  'model = "chatgpt-web/gpt-6-sol"', 'model_provider = "mock"',
   `model_catalog_json = ${JSON.stringify(join(root, "models.json"))}`,
   '[model_providers.mock]', 'name = "Local mock only"', `base_url = "http://127.0.0.1:${server.port}/web-only/v1"`,
   'env_key = "WEB_ONLY_MOCK_KEY"', 'wire_api = "responses"', 'supports_websockets = false',

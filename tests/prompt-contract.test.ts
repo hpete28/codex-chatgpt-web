@@ -356,7 +356,7 @@ test("Bigger Context compaction preserves history above the retired inline byte 
   }
 }, 30_000);
 
-test("Bigger Context minimizes the largest ordered stage instead of overfilling a middle part", () => {
+test("Bigger Context keeps preliminary parts small and preserves all records in order", () => {
   const compact = request("high");
   compact._compactionRequest = true;
   compact.context.systemPrompt = ["system".repeat(1_000)];

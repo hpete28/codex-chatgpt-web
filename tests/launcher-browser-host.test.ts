@@ -24,16 +24,89 @@ import {
 import type { Browser, BrowserContext, Page } from "playwright-core";
 import { ChatGptBrowserWorker } from "../src/adapters/chatgpt-web/browser-worker";
 
+// The actual launcher control host uses Node HTTP. Keep cancellation fixtures
+// on that transport too: Bun 1.4.0 on Windows corrupts Node HTTP after an
+// aborted fetch to an in-process Bun.serve handler.
+async function controlFixture(fetch: (req: Request) => Response | Promise<Response>) {
+  const pending = new Set<Promise<void>>();
+  const server = createServer((request, response) => {
+    const handling = (async () => {
+      const chunks: Buffer[] = [];
+      for await (const chunk of request) chunks.push(Buffer.from(chunk));
+      const result = await fetch(new Request(`http://127.0.0.1${request.url}`, {
+        method: "POST", body: Buffer.concat(chunks),
+      }));
+      response.writeHead(result.status, Object.fromEntries(result.headers));
+      response.end(Buffer.from(await result.arrayBuffer()));
+    })();
+    pending.add(handling);
+    void handling.catch(() => response.destroy()).finally(() => pending.delete(handling));
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  return {
+    port: (server.address() as { port: number }).port,
+    async stop() {
+      await Promise.allSettled(pending);
+      server.closeAllConnections();
+      await new Promise<void>(resolve => server.close(() => resolve()));
+    },
+  };
+}
+
 const roots: string[] = [];
+
+test("launcher activity follows actual send callbacks and current-turn tool counts", async () => {
+  const messages: Array<{ phase: string; progress?: { stage: string; activeToolCalls: number } }> = [];
+  const server = await controlFixture(async request => {
+    const message = await request.json() as typeof messages[number];
+    messages.push(message);
+    return Response.json(message.phase === "start"
+      ? { surfaceId: "a".repeat(32), reused: false, connectorBound: false }
+      : { cancelledByUser: false });
+  });
+  const waitForStage = async (stage: string) => {
+    const deadline = Date.now() + 1_000;
+    while (!messages.some(message => message.progress?.stage === stage) && Date.now() < deadline) await Bun.sleep(5);
+    expect(messages.some(message => message.progress?.stage === stage)).toBeTrue();
+  };
+  let activeToolCalls = 0;
+  let activated = 0;
+  let submitted = 0;
+  try {
+    const worker = Object.assign(Object.create(ChatGptBrowserWorker.prototype), {
+      config: { browserHost: "launcher", browserHostDescriptorPath: descriptorFile(`http://127.0.0.1:${server.port}`) },
+      runBrowserTurn: async (turn: { onSendActivated(): Promise<void>; onSubmitted(): Promise<void> }) => {
+        await waitForStage("preparing");
+        await turn.onSendActivated();
+        await waitForStage("sending");
+        activeToolCalls = 2;
+        await turn.onSubmitted();
+        await waitForStage("chatgpt");
+        return "done";
+      },
+    });
+    await expect(worker.runExclusive({
+      traceId: "activity-fixture", capabilities: { localToolsEnabled: true },
+      externalProgress: { snapshot: () => ({ activeToolCalls }) },
+      onSendActivated: () => { activated++; }, onSubmitted: () => { submitted++; },
+    })).resolves.toBe("done");
+    expect(messages.filter(message => message.progress).map(message => message.progress)).toEqual([
+      { stage: "preparing", activeToolCalls: 0 }, { stage: "sending", activeToolCalls: 0 },
+      { stage: "chatgpt", activeToolCalls: 2 },
+    ]);
+    expect(messages.at(-1)?.phase).toBe("end");
+    expect([activated, submitted]).toEqual([1, 1]);
+  } finally { await server.stop(); }
+});
 
 test("a blocked sign-in replaces an opaque navigation abort with a non-retryable session error", async () => {
   let needsSignIn: unknown = true;
-  const server = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(req) {
+  const server = await controlFixture(async req => {
     const activity = await req.json() as { phase: string };
     return Response.json(activity.phase === "start"
       ? { surfaceId: "a".repeat(32), reused: false, connectorBound: false }
       : { cancelledByUser: false, authenticationRequired: needsSignIn });
-  } });
+  });
   try {
     const descriptor = descriptorFile(`http://127.0.0.1:${server.port}`);
     const worker = Object.assign(Object.create(ChatGptBrowserWorker.prototype), {
@@ -49,19 +122,23 @@ test("a blocked sign-in replaces an opaque navigation abort with a non-retryable
     needsSignIn = "true";
     await expect(notifyLauncherTurn(descriptor, { phase: "end", traceId: "auth-redirect", helperPid: process.pid, status: "failed" }))
       .rejects.toThrow("invalid authentication state");
-  } finally { server.stop(true); }
+  } finally { await server.stop(); }
 });
 
 test("startup waits beyond five seconds and distinguishes its deadline from caller cancellation", async () => {
   let calls = 0;
+  const pendingHandlers = new Set<Promise<void>>();
   let thirdStarted!: () => void;
   const thirdRequest = new Promise<void>(resolve => { thirdStarted = resolve; });
-  const server = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch() {
+  const server = await controlFixture(async () => {
     calls++;
     if (calls === 3) thirdStarted();
-    await Bun.sleep(calls === 1 ? 5_100 : 250);
+    const delay = Bun.sleep(calls === 1 ? 5_100 : 250);
+    pendingHandlers.add(delay);
+    await delay;
+    pendingHandlers.delete(delay);
     return Response.json({ surfaceId: "a".repeat(32), reused: false, connectorBound: false });
-  } });
+  });
   try {
     const descriptor = descriptorFile(`http://127.0.0.1:${server.port}`);
     const activity = { phase: "start" as const, traceId: "bounded-start", helperPid: process.pid };
@@ -73,7 +150,13 @@ test("startup waits beyond five seconds and distinguishes its deadline from call
     controller.abort();
     await expect(pending).rejects.toMatchObject({ name: "AbortError" });
     expect(calls).toBe(3);
-  } finally { server.stop(true); }
+  } finally {
+    // Cancelled clients do not cancel the fixture's handler. Drain it before
+    // stopping Bun's server; destroying it during the delay corrupts subsequent
+    // node:http handling in Bun 1.4.0 on Windows.
+    await Promise.all(pendingHandlers);
+    await server.stop();
+  }
 }, 10_000);
 
 afterEach(() => {
@@ -401,7 +484,13 @@ test("launcher liveness verification checks only owned process and loopback CDP 
 
 test("launcher session verification reports its own deadline instead of a generic abort", async () => {
   const server = createServer(async (request, response) => {
-    for await (const _chunk of request) { /* consume request */ }
+    try {
+      for await (const _chunk of request) { /* consume request */ }
+    } catch {
+      // The five-millisecond deadline may abort before the request body arrives.
+      response.destroy();
+      return;
+    }
     await new Promise(resolveDelay => setTimeout(resolveDelay, 30));
     if (!response.destroyed) {
       response.writeHead(500, { "content-type": "application/json" });

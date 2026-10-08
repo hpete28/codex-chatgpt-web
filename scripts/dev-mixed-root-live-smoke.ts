@@ -39,7 +39,7 @@ process.env.CODEX_CHATGPT_WEB_HOME = devHome;
 const bundled = spawnSync(exe, ['debug', 'models', '--bundled'], { encoding: 'utf8', timeout: 15000 });
 if (bundled.status !== 0) throw new Error('Cannot read official model catalog for isolated live test');
 const bundledCatalog = JSON.parse(bundled.stdout) as { models?: Array<{ slug?: unknown }> };
-const nativeRootModel = ['gpt-6-sol', 'gpt-5.6-sol'].find(slug =>
+const nativeRootModel = ['gpt-6.1-sol', 'gpt-6-sol'].find(slug =>
   bundledCatalog.models?.some(model => model.slug === slug));
 if (!nativeRootModel) throw new Error('Official Codex model catalog has no supported native root model');
 const codexVersion = spawnSync(exe, ['--version'], { encoding: 'utf8', timeout: 15000 }).stdout.trim();
@@ -86,9 +86,9 @@ try {
   await TurnBroker.forSocket(cfg.brokerSocketPath).listen(); // Same DEV socket selected by Codex Native2 DEV.
   const models = join(testDir, 'models.json');
   writeFileSync(models, JSON.stringify(augmentNativeModelCatalog(bundledCatalog, cfg)));
-  const webChildModel = 'chatgpt-web/gpt-5.6-sol';
+  const webChildModel = 'chatgpt-web/gpt-6-sol';
   writeFileSync(join(home, 'config.toml'), [
-    `model = ${JSON.stringify(nativeRoot ? nativeRootModel : 'chatgpt-web/high')}`, 'model_provider = "proof"', `model_catalog_json = ${JSON.stringify(models)}`,
+    `model = ${JSON.stringify(nativeRoot ? nativeRootModel : 'chatgpt-web/gpt-6-sol')}`, 'model_provider = "proof"', `model_catalog_json = ${JSON.stringify(models)}`,
     '[model_providers.proof]', 'name = "DEV mixed-root live probe"',
     `base_url = "http://127.0.0.1:${server.port}/mixed-root/v1"`,
     'env_key = "PROOF_KEY"', 'wire_api = "responses"', 'supports_websockets = false',
@@ -140,7 +140,7 @@ try {
   const child = sessions.find(x => x.parent === root?.id && x.id !== root?.id);
   const passed = exit === 0 && sessions.length === 2 && unexpectedNativeForward === 0
     && (nativeRoot ? authorizedNativeRootForward > 0 && nativeUpstreamStatuses.every(status => status >= 200 && status < 300) : authorizedNativeRootForward === 0)
-    && root?.provider === 'proof' && root.models.includes(nativeRoot ? nativeRootModel : 'chatgpt-web/high') && root.spawnCalled
+    && root?.provider === 'proof' && root.models.includes(nativeRoot ? nativeRootModel : 'chatgpt-web/gpt-6-sol') && root.spawnCalled
     && root.waitCalled && root.waitReceivedChild && root.completed && root.parentResult
     && child?.provider === 'proof' && child.models.includes(webChildModel)
     && child.completed && child.childResult;
