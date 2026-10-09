@@ -64,6 +64,7 @@ import {
 import { loginVerificationMarkerPath } from "../../browser-login";
 import {
   connectLauncherBrowserHost,
+  LauncherBrowserControlTransportError,
   LauncherBrowserTurnCancelledError,
   LauncherRetainedConversationUnavailableError,
   LAUNCHER_TURN_HEARTBEAT_INTERVAL_MS,
@@ -4393,10 +4394,19 @@ export class ChatGptBrowserWorker {
         if (controlError instanceof ChatGptWebAdapterError && controlError.code === "client_cancelled") {
           throw controlError;
         }
-        if (!originalError) throw controlError;
-        console.error(
-          `[chatgpt-web] launcher turn-end notification failed after browser error: ${controlError instanceof Error ? controlError.message : String(controlError)}`,
-        );
+        if (!originalError) {
+          if (!(controlError instanceof LauncherBrowserControlTransportError)) throw controlError;
+          // The browser result is already complete and immutable at this point. A transient failure
+          // to acknowledge /turn/end must not discard it; the launcher lease watchdog will reap an
+          // unacknowledged running tab after heartbeats stop.
+          console.warn(
+            `[chatgpt-web] launcher turn-end transport failed after successful browser completion; preserving the completed Codex result: ${controlError.message}`,
+          );
+        } else {
+          console.error(
+            `[chatgpt-web] launcher turn-end notification failed after browser error: ${controlError instanceof Error ? controlError.message : String(controlError)}`,
+          );
+        }
       }
     }
   }
@@ -5082,7 +5092,10 @@ export class ChatGptBrowserWorker {
           }
           const textDelta = (() => {
             try {
-              return markdownBuffer.observe(snapshot.markdownSegments);
+              // Local-tool turns can re-render earlier answer blocks after later MCP results settle.
+              // Keep final-answer Markdown provisional until terminal DOM evidence so irreversible
+              // Codex text deltas never race ChatGPT's own finalization.
+              return markdownBuffer.observe(snapshot.markdownSegments, Date.now(), !mode.localTools);
             } catch (error) {
               return throwMarkdownConsistencyError(error);
             }

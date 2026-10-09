@@ -22,6 +22,13 @@ export class LauncherRetainedConversationUnavailableError extends Error {
   }
 }
 
+export class LauncherBrowserControlTransportError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "LauncherBrowserControlTransportError";
+  }
+}
+
 export class LauncherManualTurnTimedOutError extends Error {
   constructor(message: string) {
     super(message);
@@ -648,19 +655,37 @@ export async function notifyLauncherTurn(
   connectorBound?: boolean;
   cancelledByUser?: boolean;
 }> {
-  const descriptor = readLauncherBrowserHostDescriptor(descriptorPath);
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const response = await fetch(`${descriptor.control.endpoint}/v1/turn/${activity.phase}`, {
-      method: "POST",
-      headers: {
-        authorization: `Bearer ${descriptor.control.token}`,
-        "content-type": "application/json",
-      },
-      body: JSON.stringify(activity),
-      signal: controller.signal,
-    });
+  // Start and heartbeat are idempotent for a trace, so a brief local control-channel interruption
+  // should not fail the Codex turn. Re-read the descriptor for each retry so a recovered launcher
+  // can publish a fresh loopback endpoint/token. End is intentionally not retried here because a
+  // lost response may arrive after the launcher already released a non-retained tab.
+  const retryDelaysMs = activity.phase === "end" ? [] : [100, 300];
+  for (let attempt = 0; ; attempt += 1) {
+    const descriptor = readLauncherBrowserHostDescriptor(descriptorPath);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    let response: Response;
+    try {
+      response = await fetch(`${descriptor.control.endpoint}/v1/turn/${activity.phase}`, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${descriptor.control.token}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify(activity),
+        signal: controller.signal,
+      });
+    } catch (error) {
+      const transportError = new LauncherBrowserControlTransportError(
+        `Launcher browser control channel failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      if (attempt >= retryDelaysMs.length) throw transportError;
+      await new Promise(resolveRetry => setTimeout(resolveRetry, retryDelaysMs[attempt]!));
+      continue;
+    } finally {
+      clearTimeout(timer);
+    }
+
     if (!response.ok) {
       const body = await response.json().catch(() => ({})) as Record<string, unknown>;
       if (response.status === 409 && body.code === "turn_cancelled") {
@@ -674,7 +699,7 @@ export async function notifyLauncherTurn(
         );
       }
       const detail = typeof body.error === "string" ? body.error : "";
-      throw new Error(`HTTP ${response.status}${detail ? `: ${detail}` : ""}`);
+      throw new Error(`Launcher browser control channel failed: HTTP ${response.status}${detail ? `: ${detail}` : ""}`);
     }
     const body = await response.json().catch(() => ({})) as Record<string, unknown>;
     if (activity.phase === "start") {
@@ -700,12 +725,6 @@ export async function notifyLauncherTurn(
       return { cancelledByUser: body.cancelledByUser };
     }
     return {};
-  } catch (error) {
-    if (error instanceof LauncherBrowserTurnCancelledError
-      || error instanceof LauncherRetainedConversationUnavailableError) throw error;
-    throw new Error(`Launcher browser control channel failed: ${error instanceof Error ? error.message : String(error)}`);
-  } finally {
-    clearTimeout(timer);
   }
 }
 

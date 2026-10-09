@@ -200,7 +200,11 @@ export class ChatGptMarkdownBuffer {
     }
   }
 
-  observe(segments: ChatGptMarkdownSegment[], now = Date.now()): string {
+  observe(
+    segments: ChatGptMarkdownSegment[],
+    now = Date.now(),
+    streamCompletedBlocks = true,
+  ): string {
     const reconciled = this.reconcile(segments);
     if (reconciled instanceof ChatGptMarkdownConsistencyError) {
       this.consistencyError = reconciled;
@@ -235,6 +239,10 @@ export class ChatGptMarkdownBuffer {
     for (const candidateId of this.candidates.keys()) {
       if (!visibleCandidates.has(candidateId)) this.candidates.delete(candidateId);
     }
+    // Tool-capable turns can legitimately rewrite earlier rendered answer blocks after later tool
+    // calls settle. Their commentary/tool events remain live, but Responses text deltas cannot be
+    // retracted, so callers may keep final-answer Markdown provisional until terminal DOM evidence.
+    if (!streamCompletedBlocks) return "";
 
     let delta = "";
     let committedCount = 0;

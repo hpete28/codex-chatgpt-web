@@ -2251,6 +2251,32 @@ describe("ChatGPT outer-native harness v4", () => {
     }
   });
 
+  test("defers irreversible final-answer Markdown while a tool-capable turn can rewrite it", () => {
+    const buffer = new ChatGptMarkdownBuffer(markdown => markdown, 0);
+    const provisional = [{
+      key: "0:p",
+      tag: "p",
+      html: '<p data-start="0" data-end="24">Checking the repository.</p>',
+      text: "Checking the repository.",
+      sourceStart: 0,
+      sourceEnd: 24,
+      streamable: true,
+    }];
+    const final = [{
+      key: "0:p",
+      tag: "p",
+      html: '<p data-start="0" data-end="24">All checks passed.</p>',
+      text: "All checks passed.",
+      sourceStart: 0,
+      sourceEnd: 24,
+      streamable: false,
+    }];
+    expect(buffer.observe(provisional, 0, false)).toBe("");
+    expect(buffer.observe(final, 20, false)).toBe("");
+    expect(buffer.currentSnapshotIsConsistent()).toBe(true);
+    expect(buffer.finish()).toEqual({ markdown: "All checks passed.", delta: "All checks passed." });
+  });
+
   test("distinguishes repeated paragraphs by source range after the first copy is virtualized", () => {
     const buffer = new ChatGptMarkdownBuffer(markdown => markdown, 100);
     const repeated = (sourceStart: number, sourceEnd: number, streamable: boolean) => ({
