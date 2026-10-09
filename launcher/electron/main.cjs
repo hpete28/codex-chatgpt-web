@@ -18,7 +18,7 @@ const {
   shell,
   Tray,
 } = require("electron");
-const { configureBrowserDebugging, waitForBrowserDebugging } = require("./browser-debugging.cjs");
+const { configurePrimaryInstance, waitForBrowserDebugging } = require("./browser-debugging.cjs");
 const { BrowserHost, navigationErrorForLog } = require("./browser-host.cjs");
 const { BrowserControlServer } = require("./control-server.cjs");
 const { LimitsController } = require("./limits-controller.cjs");
@@ -83,7 +83,7 @@ const launcherUserData = LAUNCHER_PROFILE.userData;
 fs.mkdirSync(launcherUserData, { recursive: true, mode: 0o700 });
 if (process.platform !== "win32") fs.chmodSync(launcherUserData, 0o700);
 app.setPath("userData", launcherUserData);
-const browserDebugging = configureBrowserDebugging(app, launcherUserData);
+const { isPrimaryInstance, browserDebugging } = configurePrimaryInstance(app, launcherUserData);
 app.setAppLogsPath(path.join(launcherUserData, "logs"));
 installProcessDiagnosticGuards({
   filePath: path.join(launcherUserData, "logs", "process-stream-errors.log"),
@@ -1169,8 +1169,7 @@ async function requestQuit() {
 }
 
 async function start() {
-  const gotLock = app.requestSingleInstanceLock();
-  if (!gotLock) {
+  if (!isPrimaryInstance) {
     app.quit();
     return;
   }

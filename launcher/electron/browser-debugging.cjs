@@ -77,4 +77,14 @@ async function waitForBrowserDebugging(binding, { timeoutMs = 15_000, fetchEndpo
   throw new Error("Launcher browser debugging endpoint did not become ready");
 }
 
-module.exports = { allocateLoopbackPort, configureBrowserDebugging, waitForBrowserDebugging };
+function configurePrimaryInstance(app, userData, options = {}) {
+  // Duplicate launches only need to notify the running application. Do not
+  // spawn a debugging-port helper before discovering the instance lock is held.
+  const isPrimaryInstance = app.requestSingleInstanceLock();
+  return {
+    isPrimaryInstance,
+    browserDebugging: isPrimaryInstance ? configureBrowserDebugging(app, userData, options) : null,
+  };
+}
+
+module.exports = { allocateLoopbackPort, configureBrowserDebugging, configurePrimaryInstance, waitForBrowserDebugging };

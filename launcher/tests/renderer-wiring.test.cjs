@@ -280,7 +280,7 @@ test("startup failure stays visible on another launch and Retry exits the failed
 test("debugging is configured early while browser surfaces wait for runtime verification", () => {
   const start = electronMain.indexOf("async function start()");
   const runtimeValidation = electronMain.indexOf("installedRuntimeRoot = runtimeRootProvider();", start);
-  const cdpConfiguration = electronMain.indexOf("const browserDebugging = configureBrowserDebugging(");
+  const cdpConfiguration = electronMain.indexOf("const { isPrimaryInstance, browserDebugging } = configurePrimaryInstance(");
   const cdpPortAllocation = electronMain.indexOf("cdpPort = await waitForBrowserDebugging(", start);
   const windowCreation = electronMain.indexOf("mainWindow = createWindow({", start);
   const controlServerStart = electronMain.indexOf("browserControl = await new BrowserControlServer({", start);
