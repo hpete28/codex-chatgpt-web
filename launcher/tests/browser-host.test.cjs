@@ -1296,6 +1296,7 @@ test("logout clears only the owned ChatGPT session and returns to the sign-in su
       calls.push(["closeAuthView", view, closeContents, refreshMain]);
       this.authView = null;
     },
+    clearOwnedSessionForPasskey: async () => calls.push(["clearOwnedSessionForPasskey"]),
     setState(patch) {
       this.state = { ...this.state, ...patch };
       calls.push(["setState", patch]);
@@ -1320,11 +1321,89 @@ test("logout clears only the owned ChatGPT session and returns to the sign-in su
   assert.equal(result.authenticated, false);
   assert.equal(result.status, "signed-out");
   assert.deepEqual(calls[0], ["manualOperation", "ChatGPT logout"]);
-  assert.deepEqual(calls[1], ["closeAuthView", authView, true, false]);
-  assert.deepEqual(calls[2], ["clearStorageData"]);
-  assert.deepEqual(calls[4], ["loadURL", "https://chatgpt.com/?temporary-chat=true"]);
+  const clearOwnedIndex = calls.findIndex(([name]) => name === "clearOwnedSessionForPasskey");
+  const signInLoadIndex = calls.findIndex(([name, url]) => (
+    name === "loadURL" && url === "https://chatgpt.com/?temporary-chat=true"
+  ));
+  assert.ok(clearOwnedIndex > 0);
+  assert.ok(signInLoadIndex > clearOwnedIndex);
+  assert.equal(calls.some(([name]) => name === "clearStorageData"), false);
   assert.ok(calls.some(([name]) => name === "activateHomeSurface"));
   assert.ok(calls.some(([name]) => name === "show"));
+});
+
+test("owned-session cleanup retires retained tabs before clearing the shared browser session", async () => {
+  const events = [];
+  const browserSession = {
+    clearStorageData: async () => events.push("clear-storage"),
+    flushStorageData: () => events.push("flush-storage"),
+    cookies: { flushStore: async () => events.push("flush-cookies") },
+  };
+  const makeContents = (name) => ({
+    session: browserSession,
+    isDestroyed: () => false,
+    loadURL: async (url) => events.push(["load", name, url]),
+    stop: () => events.push(["stop", name]),
+  });
+  const retainedTab = { id: "retained-tab", view: { webContents: makeContents("retained") } };
+  const fixture = {
+    authView: null,
+    turnTabs: new Map([[retainedTab.id, retainedTab]]),
+    view: { webContents: makeContents("home") },
+    removeTurnTab(tab, closeContents) {
+      events.push(["remove", tab.id, closeContents]);
+      this.turnTabs.delete(tab.id);
+    },
+  };
+
+  await BrowserHost.prototype.clearOwnedSessionForPasskey.call(fixture);
+
+  const clearIndex = events.indexOf("clear-storage");
+  const removeIndex = events.findIndex((event) => Array.isArray(event) && event[0] === "remove");
+  const loadIndexes = events
+    .map((event, index) => Array.isArray(event) && event[0] === "load" ? index : -1)
+    .filter((index) => index >= 0);
+  assert.equal(loadIndexes.length, 2);
+  assert.ok(loadIndexes.every((index) => index < clearIndex));
+  assert.ok(removeIndex > Math.max(...loadIndexes));
+  assert.ok(removeIndex < clearIndex);
+  assert.equal(fixture.turnTabs.size, 0);
+  assert.deepEqual(events.slice(-3), ["clear-storage", "flush-storage", "flush-cookies"]);
+});
+
+test("logout navigation timeout releases the browser operation lock after session cleanup", async () => {
+  const throttling = [];
+  const states = [];
+  let stopped = 0;
+  const fixture = {
+    ready: async () => {},
+    activeTraceId: null,
+    manualOperation: null,
+    logoutNavigationTimeoutMs: 10,
+    clearOwnedSessionForPasskey: async () => {},
+    activateHomeSurface() {},
+    setState(patch) { states.push(patch); },
+    logger: { info() {} },
+    view: {
+      webContents: {
+        isDestroyed: () => false,
+        setBackgroundThrottling: (enabled) => throttling.push(enabled),
+        loadURL: async () => await new Promise(() => {}),
+        stop: () => { stopped += 1; },
+      },
+    },
+    withManualOperation: BrowserHost.prototype.withManualOperation,
+  };
+
+  await assert.rejects(
+    BrowserHost.prototype.logout.call(fixture),
+    /timed out while reopening Temporary Chat/,
+  );
+
+  assert.equal(stopped, 1);
+  assert.equal(fixture.manualOperation, null);
+  assert.deepEqual(throttling, [false, true]);
+  assert.ok(states.some((patch) => patch.status === "error"));
 });
 
 test("launcher shutdown persists ChatGPT DOM storage and cookies before browser destruction", async () => {
