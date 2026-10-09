@@ -77,6 +77,11 @@ test("Full-mode Pro prompts pass one stable turn token directly to native action
   expect(transportOnly).not.toMatch(/codex_bind_turn|binding_id|outer_tool_gateway|command_tool/);
   expect(transportOnly).not.toMatch(/codex_exec|codex_write_stdin|codex_apply_patch|codex_view_image|codex_tool_inventory|codex\.control\.turn_complete/);
   expect(transportOnly).toContain("Do not claim a safety or permission block without an explicit tool result or platform error supporting it.");
+  expect(transportOnly).toContain("Distinguish an ordinary permission or approval request from a platform safety refusal.");
+  expect(transportOnly).toContain("that is not a missing user approval");
+  expect(transportOnly).toContain("Do not repeatedly ask for confirmation, replay the same call, switch tools or execution routes");
+  expect(transportOnly).toContain("persist short durable progress checkpoints");
+  expect(transportOnly).toContain("must not read the first-pass score");
   expect(transportOnly).not.toMatch(/expired|invalid|revoked|blocked|security layer|permission gate/i);
   expect(compiled.text).not.toContain("CODEX_INTERNAL_CONTEXT_COMPACT");
   expect(compiled.text).not.toContain("internally compacts this response");
