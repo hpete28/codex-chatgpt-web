@@ -123,3 +123,55 @@ test("mixed-root route authenticates canonical ancestry and rejects native desce
     rmSync(f.home, { recursive: true, force: true });
   }
 });
+
+test("mixed-root preserves native-only descendants while Web ancestry stays protected across restart", async () => {
+  const f = fixture();
+  const previous = process.env.CODEX_HOME;
+  process.env.CODEX_HOME = f.home;
+  f.write(childId, rootId, "gpt-6.1-sol");
+  f.write(grandId, childId, "gpt-6.1-sol");
+  appendFileSync(f.path(childId), JSON.stringify({ type: "response_item", payload: {
+    type: "message", role: "user", content: '{"type":"turn_context","payload":{"model":"chatgpt-web/high"}}',
+  } }) + "\n");
+  const config = defaultConfig("browser-only");
+  config.port = 0;
+  let forwarded = 0;
+  const dependencies = { fetchUpstream: async () => { forwarded++; return Response.json({ native: true }); } };
+  let server = startServer(config, dependencies);
+  const send = (id: string, parent: string, endpoint = "/v1/responses", turn = turnId) => fetch(
+    `http://127.0.0.1:${server.port}/mixed-root${endpoint}`, {
+      method: "POST", headers: { authorization: "Bearer local-native-test", "content-type": "application/json" },
+      body: JSON.stringify(body(id, "gpt-6.1-sol", parent, turn)),
+    },
+  );
+  try {
+    expect((await send(childId, rootId)).status).toBe(200);
+    expect((await send(grandId, childId)).status).toBe(200);
+    expect((await send(childId, rootId, "/v1/responses/compact")).status).toBe(200);
+    expect(forwarded).toBe(3);
+    expect((await send(grandId, rootId)).status).toBe(400);
+    // A former Web turn must not become a native fallback by resuming the same child.
+    appendFileSync(f.path(childId), [
+      { type: "turn_context", payload: { turn_id: "66666666-6666-4666-8666-666666666666", model: "chatgpt-web/high" } },
+      { type: "response_item", payload: { type: "message", role: "user", content: "padding ".repeat(10_000) } },
+      { type: "turn_context", payload: { turn_id: resumedTurnId, model: "gpt-6.1-sol" } },
+    ].map(value => JSON.stringify(value)).join("\n") + "\n");
+    expect((await send(childId, rootId, "/v1/responses", resumedTurnId)).status).toBe(400);
+    expect((await send(grandId, childId)).status).toBe(400);
+    expect((await send(childId, rootId, "/v1/responses/compact", resumedTurnId)).status).toBe(400);
+    expect(forwarded).toBe(3);
+    await server.stop(true);
+    server = startServer(config, dependencies);
+    expect((await send(grandId, childId)).status).toBe(400);
+    expect((await send(childId, rootId, "/v1/responses", resumedTurnId)).status).toBe(400);
+    // Web root ancestry also protects a freshly native child even without a Web child turn.
+    f.write(rootId, undefined, "chatgpt-web/high");
+    f.write(childId, rootId, "gpt-6.1-sol");
+    expect((await send(childId, rootId)).status).toBe(400);
+    expect(forwarded).toBe(3);
+  } finally {
+    await server.stop(true);
+    if (previous === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = previous;
+    rmSync(f.home, { recursive: true, force: true });
+  }
+});

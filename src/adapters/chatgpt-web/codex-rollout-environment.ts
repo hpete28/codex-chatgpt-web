@@ -195,7 +195,11 @@ function firstRolloutRecord(fd: number, size: number): Record<string, unknown> {
   throw new Error("Codex rollout has no complete session metadata record");
 }
 
-function latestTurnContext(fd: number, size: number): Record<string, unknown> | undefined {
+function latestTurnContext(
+  fd: number,
+  size: number,
+  accept: (context: Record<string, unknown>) => boolean = () => true,
+): Record<string, unknown> | undefined {
   let position = size;
   let carry = Buffer.alloc(0);
   let firstSegmentAtEof = true;
@@ -224,7 +228,11 @@ function latestTurnContext(fd: number, size: number): Record<string, unknown> | 
         throw new Error("Codex rollout JSONL record exceeds the bounded record size");
       }
       const item = parseJsonLine(line);
-      if (item.type === "turn_context") return record(item.payload);
+      if (item.type === "turn_context") {
+        const context = record(item.payload);
+        if (!context) throw new Error("Codex rollout turn context is invalid");
+        if (context && accept(context)) return context;
+      }
     }
     carry = Buffer.from(data.subarray(0, lineEnd));
     if (carry.length > MAX_ROLLOUT_JSON_LINE_BYTES) {
@@ -233,7 +241,8 @@ function latestTurnContext(fd: number, size: number): Record<string, unknown> | 
   }
   if (carry.length === 0) return undefined;
   const item = parseJsonLine(carry);
-  return item.type === "turn_context" ? record(item.payload) : undefined;
+  const context = item.type === "turn_context" ? record(item.payload) : undefined;
+  return context && accept(context) ? context : undefined;
 }
 
 function verifyHistoricalEnvironmentMessages(
@@ -445,7 +454,8 @@ export function resolveCodexRoutingLineage(options: {
   model: string;
   parentThreadId?: string;
   agentName?: string;
-}): { rootThreadId: string; depth: number } {
+  inspectNativeHistory?: boolean;
+}): { rootThreadId: string; depth: number; hasWebHistory: boolean } {
   const { codexHome, threadId, turnId, model, parentThreadId, agentName } = options;
   if (!CODEX_ID.test(threadId) || !CODEX_ID.test(turnId) || !model) {
     throw new Error("Protected request has invalid Codex thread, turn, or model identity");
@@ -457,6 +467,7 @@ export function resolveCodexRoutingLineage(options: {
   let currentId = threadId;
   let expectedParent = parentThreadId;
   let expectedName = agentName;
+  let hasWebHistory = false;
   for (let depth = 0; depth < 16; depth += 1) {
     if (seen.has(currentId)) throw new Error("Codex rollout spawn ancestry contains a cycle");
     seen.add(currentId);
@@ -474,6 +485,20 @@ export function resolveCodexRoutingLineage(options: {
           throw new Error("Protected request disagrees with the current Codex rollout turn");
         }
       }
+      if (options.inspectNativeHistory && !hasWebHistory) {
+        const latest = latestTurnContext(fd, size);
+        if (typeof latest?.model !== "string" || !latest.model) {
+          throw new Error("Native descendant ancestry has no canonical model history");
+        }
+        // Check durable history, not just the latest model: switching/resuming a Web branch must
+        // not grant native fallback. The existing bounded reader ignores incomplete JSONL tails.
+        hasWebHistory = latestTurnContext(fd, size, context => {
+          if (typeof context.model !== "string" || !context.model) {
+            throw new Error("Native descendant ancestry has invalid canonical model history");
+          }
+          return context.model.startsWith("chatgpt-web/");
+        }) !== undefined;
+      }
     } finally {
       closeSync(fd);
     }
@@ -486,7 +511,7 @@ export function resolveCodexRoutingLineage(options: {
         || typeof payload.source !== "string") {
         throw new Error("Protected root is not a canonical Codex root thread");
       }
-      return { rootThreadId: currentId, depth };
+      return { rootThreadId: currentId, depth, hasWebHistory };
     }
     if (meta.type !== "session_meta" || payload?.id !== currentId
       || payload.parent_thread_id !== expectedParent || payload.thread_source !== "subagent"

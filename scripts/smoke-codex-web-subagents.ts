@@ -207,7 +207,9 @@ try {
   const finalMessage = typeof rootCompletion?.last_agent_message === "string"
     ? rootCompletion.last_agent_message
     : "";
-  if (!finalMessage.includes("LIVE_WEB_SUBAGENT_OK") || !finalMessage.includes(expectedVersion)) {
+  // ChatGPT may escape Markdown underscores; JSON-decoded text preserves those backslashes.
+  const normalizedFinalMessage = finalMessage.replace(/\\+_/g, "_");
+  if (!normalizedFinalMessage.includes("LIVE_WEB_SUBAGENT_OK") || !normalizedFinalMessage.includes(expectedVersion)) {
     failures.push(`root did not return the acceptance marker for version ${expectedVersion}`);
   }
 
