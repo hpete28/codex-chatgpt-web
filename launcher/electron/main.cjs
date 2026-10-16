@@ -83,7 +83,10 @@ const launcherUserData = LAUNCHER_PROFILE.userData;
 fs.mkdirSync(launcherUserData, { recursive: true, mode: 0o700 });
 if (process.platform !== "win32") fs.chmodSync(launcherUserData, 0o700);
 app.setPath("userData", launcherUserData);
-const { isPrimaryInstance, browserDebugging } = configurePrimaryInstance(app, launcherUserData);
+let portHelperFallback = null;
+const { isPrimaryInstance, browserDebugging } = configurePrimaryInstance(app, launcherUserData, {
+  onTimeoutFallback: (detail) => { portHelperFallback = detail; },
+});
 app.setAppLogsPath(path.join(launcherUserData, "logs"));
 installProcessDiagnosticGuards({
   filePath: path.join(launcherUserData, "logs", "process-stream-errors.log"),
@@ -1238,6 +1241,7 @@ async function start() {
     filePath: path.join(app.getPath("logs"), "launcher.jsonl"),
     publish: (record) => send("launcher:log", record),
   });
+  if (portHelperFallback) logger.warn("launcher.browser_port_helper_timeout_fallback", portHelperFallback);
   app.on("child-process-gone", (_event, details) => {
     logger.warn("launcher.child_process_gone", {
       type: details.type, reason: details.reason, exitCode: details.exitCode,

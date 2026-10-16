@@ -1,4 +1,5 @@
 const { spawnSync } = require("node:child_process");
+const { randomInt } = require("node:crypto");
 
 const LOOPBACK_HOST = "127.0.0.1";
 const PORT_HELPER_TIMEOUT_MS = 5_000;
@@ -7,6 +8,8 @@ function allocateLoopbackPort({
   executable = process.execPath,
   run = spawnSync,
   environment = process.env,
+  randomPort = () => randomInt(49_152, 65_536),
+  onTimeoutFallback = () => {},
 } = {}) {
   const script = [
     'const net=require("node:net");',
@@ -27,6 +30,17 @@ function allocateLoopbackPort({
     timeout: PORT_HELPER_TIMEOUT_MS,
     windowsHide: true,
   });
+  if (result.error?.code === "ETIMEDOUT") {
+    // Windows startup, AV scanning, or a stuck Electron-as-Node child can exhaust
+    // the helper timeout. An explicit randomized high port keeps startup alive
+    // without using Chromium's --remote-debugging-port=0 behavior.
+    const fallbackPort = randomPort();
+    if (!Number.isInteger(fallbackPort) || fallbackPort < 49_152 || fallbackPort > 65_535) {
+      throw new Error("Browser debugging port fallback returned an invalid port");
+    }
+    onTimeoutFallback({ port: fallbackPort, reason: "port-helper-timeout" });
+    return fallbackPort;
+  }
   if (result.error) throw new Error(`Could not reserve a browser debugging port: ${result.error.message}`);
   if (result.status !== 0) {
     const detail = String(result.stderr || "").trim() || `exit status ${result.status ?? "unknown"}`;

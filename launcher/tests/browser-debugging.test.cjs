@@ -49,6 +49,37 @@ test("reject invalid or failed port-helper results", () => {
   );
 });
 
+test("recover synchronously from Electron port helper startup timeout", () => {
+  const timeout = Object.assign(new Error("spawnSync ETIMEDOUT"), { code: "ETIMEDOUT" });
+  let fallback = null;
+  const port = allocateLoopbackPort({
+    run: () => ({ error: timeout, status: null }),
+    randomPort: () => 61234,
+    onTimeoutFallback: (detail) => { fallback = detail; },
+  });
+  assert.equal(port, 61234);
+  assert.deepEqual(fallback, { port: 61234, reason: "port-helper-timeout" });
+  const f = fixture();
+  configureBrowserDebugging(f.app, "unused", {
+    run: () => ({ error: timeout }),
+    randomPort: () => 54322,
+  });
+  assert.deepEqual(f.switches, [
+    ["remote-debugging-address", "127.0.0.1"],
+    ["remote-debugging-port", "54322"],
+  ]);
+});
+
+test("do not hide other child startup failures or accept unsafe fallback ports", () => {
+  assert.throws(() => allocateLoopbackPort({
+    run: () => ({ error: Object.assign(new Error("ENOENT"), { code: "ENOENT" }) }),
+  }), /ENOENT/);
+  assert.throws(() => allocateLoopbackPort({
+    run: () => ({ error: Object.assign(new Error("ETIMEDOUT"), { code: "ETIMEDOUT" }) }),
+    randomPort: () => 0,
+  }), /invalid port/);
+});
+
 test("configure Chromium synchronously with an explicit non-zero debugging port", () => {
   const f = fixture();
   const binding = configureBrowserDebugging(f.app, "unused", {
