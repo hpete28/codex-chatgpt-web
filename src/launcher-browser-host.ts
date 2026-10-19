@@ -29,6 +29,13 @@ export class LauncherBrowserControlTransportError extends Error {
   }
 }
 
+export class LauncherBrowserTurnOwnerLostError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "LauncherBrowserTurnOwnerLostError";
+  }
+}
+
 export class LauncherManualTurnTimedOutError extends Error {
   constructor(message: string) {
     super(message);
@@ -738,6 +745,11 @@ export async function notifyLauncherTurn(
             typeof body.error === "string" ? body.error : "The retained ChatGPT conversation is no longer available",
           );
         }
+        if (response.status === 409 && body.code === "turn_owner_lost") {
+          throw new LauncherBrowserTurnOwnerLostError(
+            typeof body.error === "string" ? body.error : "The running ChatGPT turn lost its browser helper. Check its tab before retrying.",
+          );
+        }
         const detail = typeof body.error === "string" ? body.error : "";
         throw new Error(`HTTP ${response.status}${detail ? `: ${detail}` : ""}`);
       }
@@ -778,6 +790,7 @@ export async function notifyLauncherTurn(
         throw new Error(`Launcher browser control ${activity.phase} timed out after ${timeoutMs}ms`);
       }
       if (error instanceof LauncherBrowserTurnCancelledError
+        || error instanceof LauncherBrowserTurnOwnerLostError
         || error instanceof LauncherRetainedConversationUnavailableError) throw error;
       if (attempt === retryDelaysMs.length - 1) {
         throw new LauncherBrowserControlTransportError(
