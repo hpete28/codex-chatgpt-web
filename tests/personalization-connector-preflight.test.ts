@@ -214,6 +214,44 @@ test("a localized Unpersonalized Temporary Chat toggles the structural state and
   expect(personalized).toBeTrue();
 });
 
+test("late Personalized hydration does not strand preflight on a missing structural control", async () => {
+  let personalizedReads = 0;
+  let structuralWaits = 0;
+  let connectorProbes = 0;
+  const diagnostics: string[] = [];
+  const personalized = visibleLocator(() => ++personalizedReads >= 4 ? 1 : 0);
+  const unpersonalized = visibleLocator(() => 0);
+  const structuralControl = {
+    waitFor: async ({ state, signal }: { state: string; signal?: AbortSignal }) => {
+      expect(state).toBe("visible");
+      expect(signal?.aborted).toBeFalse();
+      structuralWaits += 1;
+      const error = new Error("structural control not rendered");
+      error.name = "TimeoutError";
+      throw error;
+    },
+    click: async () => { throw new Error("must not toggle a missing structural control"); },
+  };
+  const controls = { filter: () => controls, first: () => structuralControl };
+  const page = {
+    getByRole: (_role: string, options: { name: string | RegExp }) => (
+      matchesName(options.name, "Personalized") ? personalized : unpersonalized
+    ),
+    locator: () => controls,
+  } as any;
+
+  expect(await ensureChatGptPersonalizedConnectorAccess(
+    page,
+    async checkpoint => { diagnostics.push(checkpoint); },
+    async () => { connectorProbes += 1; return false; },
+    new AbortController().signal,
+  )).toBe("already-personalized");
+  expect(personalizedReads).toBe(4);
+  expect(structuralWaits).toBe(2);
+  expect(connectorProbes).toBe(1);
+  expect(diagnostics).toEqual(["personalization-already-enabled"]);
+});
+
 test("a localized preflight waits for its semantic control to hydrate without assuming a button tag", async () => {
   const controller = new AbortController();
   let controlReady = false;

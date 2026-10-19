@@ -611,35 +611,57 @@ async function ensureChatGptPersonalizedConnectorAccessWithinDeadline(
         await capture("personalization-already-enabled");
         return "already-personalized";
       }
-      await capture("personalization-unpersonalized");
-      const toggleReceipt = await toggleChatGptPersonalizationChoice(page, deadline, abortSignal);
-      try {
-        if (await proveConnectorAccess()) {
-          await capture("personalization-enabled");
-          return "enabled";
+      // A Temporary Chat can finish hydrating its labeled Personalization control after
+      // the first connector proof. Observe both forms of readiness until the same
+      // absolute deadline instead of waiting only on a structural control that may
+      // never exist on this ChatGPT UI.
+      const structuralControls = page.locator(CHATGPT_PERSONALIZATION_CONTROL_SELECTOR)
+        .filter({ visible: true });
+      while (personalizedCount === 0 && unpersonalizedCount === 0) {
+        try {
+          await structuralControls.first().waitFor({
+            state: "visible",
+            timeout: Math.min(300, remainingChatGptPersonalizationMs(deadline, abortSignal)),
+            signal: abortSignal,
+          });
+          break;
+        } catch (error) {
+          if (!(error instanceof Error) || error.name !== "TimeoutError") throw error;
         }
-      } catch (error) {
+        personalizedCount = await runChatGptPersonalizationStep(() => personalized.count(), deadline, abortSignal);
+        unpersonalizedCount = await runChatGptPersonalizationStep(() => unpersonalized.count(), deadline, abortSignal);
+      }
+      if (personalizedCount === 0 && unpersonalizedCount === 0) {
+        await capture("personalization-unpersonalized");
+        const toggleReceipt = await toggleChatGptPersonalizationChoice(page, deadline, abortSignal);
+        try {
+          if (await proveConnectorAccess()) {
+            await capture("personalization-enabled");
+            return "enabled";
+          }
+        } catch (error) {
+          try {
+            await restoreChatGptPersonalizationChoice(page, toggleReceipt);
+          } catch (restoreError) {
+            throw new ChatGptPersistentBrowserStateError(
+              [error, restoreError],
+              "ChatGPT personalization proof failed and the original state could not be restored",
+            );
+          }
+          throw error;
+        }
         try {
           await restoreChatGptPersonalizationChoice(page, toggleReceipt);
         } catch (restoreError) {
           throw new ChatGptPersistentBrowserStateError(
-            [error, restoreError],
-            "ChatGPT personalization proof failed and the original state could not be restored",
+            [restoreError],
+            "ChatGPT personalization changed but connector access was not proven and the original state could not be restored",
           );
         }
-        throw error;
-      }
-      try {
-        await restoreChatGptPersonalizationChoice(page, toggleReceipt);
-      } catch (restoreError) {
-        throw new ChatGptPersistentBrowserStateError(
-          [restoreError],
-          "ChatGPT personalization changed but connector access was not proven and the original state could not be restored",
+        throw chatGptConnectorUnavailableError(
+          "The configured ChatGPT connector remained unavailable after the structural personalization state changed",
         );
       }
-      throw chatGptConnectorUnavailableError(
-        "The configured ChatGPT connector remained unavailable after the structural personalization state changed",
-      );
     }
   }
   if (personalizedCount === 1 && unpersonalizedCount === 0) {
