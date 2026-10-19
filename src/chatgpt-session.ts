@@ -29,6 +29,16 @@ export const CHATGPT_EFFORT_SLIDER_CONTAINER_SELECTOR = '[data-model-reasoning-e
 export const CHATGPT_EFFORT_SLIDER_SELECTOR = '[data-model-reasoning-effort-slider] [role="slider"], [data-model-picker-power-slider] [role="slider"]';
 export const CHATGPT_EFFORT_SLIDER_MAX_OPTIONS = 5;
 
+/** Model identity precedes the localized slider position; punctuation is not language-specific. */
+export function parseChatGptModelAnnouncement(text: string): {
+  version: string; name?: string; mode: string;
+} | undefined {
+  const normalized = text.normalize("NFKC").replace(/\p{Cf}/gu, "").replace(/\s+/g, " ").trim();
+  const match = /^(?:GPT[-\s]?)?(\d+(?:\.\d+)?)(?:\s+(Sol|Astra))?\s+([^\p{P}]+)(?:\p{P}|$)/iu.exec(normalized);
+  if (!match) return undefined;
+  return { version: match[1]!, ...(match[2] ? { name: match[2].toLowerCase() } : {}), mode: match[3]!.trim() };
+}
+
 /** Read model evidence only from the slider's own active picker. */
 export async function readChatGptModelAnnouncements(slider: Locator): Promise<string[]> {
   return slider.evaluate(element => {
@@ -66,7 +76,21 @@ export async function readChatGptModelAnnouncements(slider: Locator): Promise<st
 }
 /** Resolve only inside the verified composer's form; multiple submitters are an error. */
 export const CHATGPT_SEND_BUTTON_SELECTOR = '[data-testid="send-button"], button[type="submit"]';
-export const CHATGPT_STOP_BUTTON_SELECTOR = '[data-testid="stop-button"], form[data-chatgpt-composer] button[type="button"][aria-label="Stop"]';
+// Captured in the launcher's current composer on 2026-10-09. The primary action's
+// square glyph identifies Stop without its translated label. Button type/class alone
+// also match voice controls; keep the observed icon and composer ownership together.
+const CHATGPT_STOP_ICON_PATH = "M4.5 5.75C4.5 5.05964 5.05964 4.5 5.75 4.5H14.25C14.9404 4.5 15.5 5.05964 15.5 5.75V14.25C15.5 14.9404 14.9404 15.5 14.25 15.5H5.75C5.05964 15.5 4.5 14.9404 4.5 14.25V5.75Z";
+export const CHATGPT_STOP_BUTTON_SELECTOR = '[data-testid="stop-button"], '
+  + `form[data-chatgpt-composer] button[type="button"].size-token-button-composer:has(svg.icon-primary-action > path[d="${CHATGPT_STOP_ICON_PATH}"])`;
+// Captured Luna Think control (2026-09-08). The brain glyph's opening contour,
+// composer pill and pressed state identify this action independently of its label.
+// Other composer pills (search, tools, attachments) must not be treated as Think.
+// The Free account in the DEV launcher (2026-10-11) uses an SVG sprite instead.
+// The sprite fragment stays the same with Think on/off; the asset hash does not.
+export const CHATGPT_THINK_BUTTON_SELECTOR = [
+  'button[type="button"].__composer-pill[aria-pressed]:has(> .__composer-pill-icon > svg[viewBox="0 0 24 24"] > path[d^="M14.8974 2.29998C15.8303 2.29013 16.802 2.58194 17.5566 3.22577"])',
+  'button[type="button"][aria-pressed]:has(> svg[viewBox="0 0 20 20"] > use[href$="#brain-regular-20"])',
+].join(", ");
 // The new footer is shared with user messages. Response extraction additionally requires
 // this control to FOLLOW the last assistant answer, excluding the user's earlier footer.
 export const CHATGPT_COMPLETION_ACTION_SELECTOR = 'button[data-testid="copy-turn-action-button"], [data-turn-key] .turn-action-controls button';
@@ -84,11 +108,18 @@ export const CHATGPT_USER_TURN_SELECTOR = [
 ].join(", ");
 
 /** The new renderer groups both roles under the user's stable turn key. */
-export function chatGptAssistantTurnSelector(identity: string): string {
+export function chatGptTurnContainerSelector(identity: string): string {
   const prefix = "group:assistant:";
   return identity.startsWith(prefix)
-    ? `[data-turn-key=${JSON.stringify(identity.slice(prefix.length))}]:has([data-conversation-role="assistant"], [data-chatgpt-agent-turn-start])`
+    ? `[data-turn-key=${JSON.stringify(identity.slice(prefix.length))}]`
     : `[data-turn-id=${JSON.stringify(identity)}]`;
+}
+
+export function chatGptAssistantTurnSelector(identity: string): string {
+  const container = chatGptTurnContainerSelector(identity);
+  return identity.startsWith("group:assistant:")
+    ? `${container}:has([data-conversation-role="assistant"], [data-chatgpt-agent-turn-start])`
+    : container;
 }
 
 export interface ChatGptEffortSliderState {
@@ -172,9 +203,9 @@ export async function activateChatGptEffortMenu(
 
   const settleMs = options.settleMs ?? 3_000;
   await clearGhostEffortState(page, control);
-  // The picker is an in-page control. Its owned menu is verified below; waiting
-  // for unrelated scheduled navigation can stall a valid menu transition.
-  await control.click({ force: true, noWaitAfter: true, timeout: Math.max(1, settleMs) });
+  // Let Playwright wait for stable layout and hit testing after navigation.
+  // A forced click can be delivered before the new renderer's viewport is usable.
+  await control.click({ timeout: Math.max(1, settleMs) });
   const clickedSurface = await waitForEffortSurface(page, control, settleMs);
   if (clickedSurface) return { method: "click", ...clickedSurface };
 

@@ -3,7 +3,7 @@ import { estimateTokens } from "../../lib/token-estimate";
 import {
   CHATGPT_WEB_BACKEND_MODEL,
   CHATGPT_WEB_BIGGER_CONTEXT_MULTIPLIER,
-  CHATGPT_WEB_LUNA_BIGGER_CONTEXT_ERROR,
+  CHATGPT_WEB_PLATFORM_RESERVE_TOKENS,
   isChatGptWebZeroRiskBackendModel,
   resolveChatGptWebContextLimits,
   resolveChatGptWebMessageTokenBudget,
@@ -57,9 +57,9 @@ export function estimateChatGptWebInputTokens(
     {
       ...options,
       ...(manual ? { manualControl: true as const } : {}),
-      captureLunaCheckpoint: parsed.modelId === CHATGPT_WEB_LUNA_MODEL_ID
+      captureLunaCheckpoint: options.captureLunaCheckpoint ?? (parsed.modelId === CHATGPT_WEB_LUNA_MODEL_ID
         && !parsed._compactionRequest
-        && Boolean(identity.threadId && identity.turnId),
+        && Boolean(identity.threadId && identity.turnId)),
     },
   );
   return estimateCompiledChatGptWebInputTokens(compiled, parsed.modelId);
@@ -79,19 +79,21 @@ export function resolveBiggerContextMultipartParts(
   if (isChatGptWebZeroRiskBackendModel(parsed.modelId)) {
     throw new Error("Bigger Context is unavailable for ChatGPT Zero Risk");
   }
-  if (parsed.modelId === CHATGPT_WEB_LUNA_MODEL_ID) {
-    throw new Error(CHATGPT_WEB_LUNA_BIGGER_CONTEXT_ERROR);
-  }
   const mode = resolveChatGptWebModelMode(parsed.modelId, parsed.options.reasoning, capabilities);
-  if (!supportsChatGptWebBiggerContext(parsed.modelId, mode.effort, capabilities, parsed._chatgptModelFamily)) return undefined;
-  const { contextWindow, autoCompactTokenLimit } = resolveChatGptWebContextLimits(
-    CHATGPT_WEB_BACKEND_MODEL,
+  if (!supportsChatGptWebBiggerContext(parsed.modelId, mode.effort, parsed._chatgptModelFamily)) return undefined;
+  // Compaction also needs complete context transport. Start at three stages, then
+  // expand physical stages if the measured individual message boundaries demand it.
+  const backendModel = parsed.modelId === CHATGPT_WEB_LUNA_MODEL_ID ? CHATGPT_WEB_LUNA_MODEL_ID : CHATGPT_WEB_BACKEND_MODEL;
+  const { autoCompactTokenLimit } = resolveChatGptWebContextLimits(
+    backendModel,
     mode.effort,
     { ...capabilities, experimentalBiggerContext: false },
   );
+  const contextWindow = resolveChatGptWebMessageTokenBudget(backendModel, mode.effort, capabilities)
+    + CHATGPT_WEB_PLATFORM_RESERVE_TOKENS + 1;
   const compile = (parts?: ChatGptWebMultipartPartCount): CompiledChatGptWebPrompt => compileChatGptWebPrompt(
     parsed, capabilities, mode.localTools ? ESTIMATE_TURN_TOKEN : undefined,
-    { experimentalMultipartParts: parts, experimentalSkillAttachments },
+    { experimentalMultipartParts: parts, experimentalSkillAttachments, captureLunaCheckpoint: false },
   );
   const inline = parsed._compactionRequest ? undefined : compile();
   const initialParts = parsed._compactionRequest
@@ -110,11 +112,11 @@ export function resolveBiggerContextMultipartParts(
     for (const [index, text] of messages.entries()) {
       const final = index === messages.length - 1;
       const effort = final ? mode.effort : stagingEffort;
-      const { browserComposerCharLimit } = resolveChatGptWebTransportLimits(CHATGPT_WEB_BACKEND_MODEL, effort, capabilities);
+      const { browserComposerCharLimit } = resolveChatGptWebTransportLimits(backendModel, effort, capabilities);
       if (browserComposerCharLimit !== undefined && text.length > browserComposerCharLimit) return false;
       const budget = final ? resolveChatGptWebMessageTokenBudget(
-        CHATGPT_WEB_BACKEND_MODEL, effort, capabilities, estimateChatGptWebImageTokens(compiled) + skillFileTokens(compiled.skillFiles, parsed.modelId),
-      ) : resolveChatGptWebStagingTokenBudget(CHATGPT_WEB_BACKEND_MODEL, effort, capabilities);
+        backendModel, effort, capabilities, estimateChatGptWebImageTokens(compiled) + skillFileTokens(compiled.skillFiles, parsed.modelId),
+      ) : resolveChatGptWebStagingTokenBudget(backendModel, effort, capabilities);
       if (estimateTokens(text, parsed.modelId) > budget) return false;
     }
     // Extra transport messages only reduce per-message ingestion pressure. Bigger Context remains
@@ -180,6 +182,7 @@ export function estimateChatGptWebUsage(
   experimentalSkillAttachments = false,
 ): CodexUsage {
   const inputTokens = estimateChatGptWebInputTokens(parsed, capabilities, {
+    ...(experimentalBiggerContext ? { captureLunaCheckpoint: false } : {}),
     experimentalSkillAttachments,
     experimentalMultipartParts: experimentalBiggerContext
       ? resolveBiggerContextMultipartParts(parsed, capabilities, experimentalSkillAttachments)

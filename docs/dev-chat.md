@@ -50,12 +50,13 @@ and automatic compaction without embedding a giant fixture in the user prompt. I
 directly rather than through deferred tool search so the test can prove the requested call happened.
 
 Reusing the same name continues its canonical Responses history. Sequential native messages in the
-same compaction epoch lease one Temporary Chat, exactly like production. Every message receives a
+same compaction epoch lease one ChatGPT conversation, exactly like production. Every message receives a
 new turn-bound MCP token, and all MCP tool rounds for that message remain inside the same ChatGPT
 response. On an exact native compaction request, the same Web agent submits the checkpoint through
 a one-shot MCP control call in that chat; only then does the surface close and the next epoch open a
-new Temporary Chat. The complete named history remains owned by the existing prompt compiler. New
-chats use the cheapest account-supported browser mode:
+new chat. The complete named history remains owned by the existing prompt compiler. New
+chats follow the configured **Save chats in ChatGPT** setting (on by default) and use the cheapest
+account-supported browser mode:
 Instant (`light`) when Sol is available, otherwise Luna. Override it with `--model` or `/model`.
 
 Interactive commands:
@@ -126,7 +127,7 @@ capability and no ordinary work capability. The checkpoint never rides in the ta
 huge tool result, and its wait is capped at five minutes independently of the normal turn timeout.
 After the structured handoff is accepted, the bridge explicitly ends that one-purpose browser turn
 and waits for its physical launcher settlement before closing the old surface; the next epoch then
-starts a fresh Temporary Chat. This does not depend on ChatGPT rendering assistant text or a Copy
+starts a fresh chat. This does not depend on ChatGPT rendering assistant text or a Copy
 action after the control-only response. If the retained private chat was already closed, the bridge
 starts one read-only fallback chat from the canonical Codex history instead. Browser-only mode
 has no retained MCP boundary and uses the same adaptive multipart compaction path so its summarizer

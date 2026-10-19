@@ -10,6 +10,9 @@ const REPOSITORY = "miuuyy/codex-chatgpt-web";
 const RELEASE_API_URL = `https://api.github.com/repos/${REPOSITORY}/releases/latest`;
 const USER_AGENT = "codex-web-gpt-launcher-updater";
 const MAX_REDIRECTS = 5;
+// A launcher started at sign-in can run its only check before the network is up, or while a new
+// release is still uploading its assets. Retry failures a few times; success is still checked once.
+const UPDATE_CHECK_RETRY_DELAYS_MS = [60_000, 5 * 60_000, 30 * 60_000];
 
 function isOfficialReleaseBuild(value) {
   return value && typeof value === "object" && !Array.isArray(value)
@@ -318,6 +321,7 @@ function createUpdateController({
   logsDirectory,
   publish,
   logger,
+  retryDelaysMs = UPDATE_CHECK_RETRY_DELAYS_MS,
   dependencies = {},
 }) {
   const deps = { ...defaultDependencies(), ...dependencies };
@@ -332,6 +336,7 @@ function createUpdateController({
       ? { status: "disabled", reason: "custom-build" }
       : { status: "disabled", reason: "unknown-build" };
   let checked = false;
+  let failedChecks = 0;
   let pending = null;
   let candidate = null;
 
@@ -344,6 +349,10 @@ function createUpdateController({
   async function checkOnce() {
     if (state.status === "disabled" || checked) return state;
     checked = true;
+    return check();
+  }
+
+  async function check() {
     transition({ status: "checking" });
     try {
       const release = await deps.fetchRelease();
@@ -375,8 +384,21 @@ function createUpdateController({
       return transition({ status: "available", version });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      logger?.warn("launcher.update_check_failed", { message });
-      return transition({ status: "error", message });
+      const retryInMs = retryDelaysMs[failedChecks];
+      failedChecks += 1;
+      logger?.warn("launcher.update_check_failed", {
+        message,
+        ...(retryInMs !== undefined ? { retryInMs } : {}),
+      });
+      const failed = transition({ status: "error", message });
+      if (retryInMs !== undefined) {
+        const timer = setTimeout(() => {
+          // Only a still-failed check is repeated; nothing else leaves the error state.
+          if (state === failed) void check();
+        }, retryInMs);
+        timer.unref?.();
+      }
+      return failed;
     }
   }
 
