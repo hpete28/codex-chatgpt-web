@@ -523,6 +523,12 @@ test("native runtime starts independently while browser-dependent upgrades and r
   const routeConnect = electronMain.indexOf("runtimeHost.connectBridgeRoute({ recoveryOnly: true })", runtimeStart);
   assert.ok(refreshBarrier > productionStartup, "browser-dependent upgrades retain a session readiness barrier");
   assert.ok(runtimeStart > upgrade, "configured runtime must start after any upgrade");
+  const browserReadyBeforeRoute = electronMain.indexOf("await browserStartup;", runtimeStart);
+  const browserFailureGuard = electronMain.indexOf("if (browserStartupError) throw browserStartupError;", browserReadyBeforeRoute);
+  assert.ok(browserReadyBeforeRoute > runtimeStart && browserReadyBeforeRoute < routeConnect,
+    "watchdog-recovered routing must await browser initialization");
+  assert.ok(browserFailureGuard > browserReadyBeforeRoute && browserFailureGuard < routeConnect,
+    "failed browser bootstrap must not reconnect the Codex route");
   assert.ok(routeConnect > runtimeStart, "Codex route must connect only after the runtime is healthy");
   assert.match(appSource, /browser\?\.status === "loading" \? copy\.checkingSignIn/);
 });

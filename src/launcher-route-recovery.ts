@@ -5,7 +5,10 @@ import { deactivateCodexIntegration, inspectCodexIntegration } from "./codex-int
 import { getConfigDir } from "./config";
 
 export function restoreNativeRoute() {
-  return deactivateCodexIntegration();
+  // A watchdog/fatal-startup disconnect is temporary, not a user-requested
+  // disconnect. Keep recovery intent so the next healthy launcher can restore
+  // the bridge without routing Codex to a dead local service in the meantime.
+  return deactivateCodexIntegration({ forRuntimeRecovery: true });
 }
 
 export function processAlive(pid: number): boolean {

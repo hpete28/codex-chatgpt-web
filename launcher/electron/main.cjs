@@ -1513,6 +1513,10 @@ async function start() {
     }
     const runtime = await runtimeSupervisor.startIfConfigured();
     if (runtime.status !== "ready") return runtime;
+    // Do not restore a watchdog-disconnected route while the embedded browser
+    // is still booting or has failed. Leave the saved recovery intent intact.
+    await browserStartup;
+    if (browserStartupError) throw browserStartupError;
     if (!routeWatchdogReady) throw new Error("Native route watchdog is unavailable");
     const route = await runtimeHost.connectBridgeRoute({ recoveryOnly: true });
     return { ...runtime, bridgeRouteChanged: route.changed === true };

@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { defaultConfig } from "../src/config";
-import { installCodexIntegration } from "../src/codex-integration";
+import { activateCodexIntegration, deactivateCodexIntegration, installCodexIntegration } from "../src/codex-integration";
 
 const bundle = resolve(import.meta.dir, "../launcher/build/route-recovery.cjs");
 const build = Bun.spawnSync([process.execPath, "run", "scripts/build-launcher-recovery.ts"], { cwd: resolve(import.meta.dir, "..") });
@@ -43,11 +43,28 @@ test("Node-only launcher recovery restores exact native config and both journals
       expect(result.stderr).toBe("");
       expect(result.status).toBe(0);
       expect(readFileSync(f.configPath, "utf8")).toBe(f.original);
-      expect(JSON.parse(readFileSync(f.journalPath, "utf8"))).toEqual({ ...f.journal, active: false });
+      expect(JSON.parse(readFileSync(f.journalPath, "utf8"))).toEqual({ ...f.journal, active: false, reconnectOnStartup: true });
       expect(readFileSync(f.journalPath.replace(".json", ".recovery.json"), "utf8")).toBe(readFileSync(f.journalPath, "utf8"));
     }
   } finally { f.close(); }
 }, 30_000);
+
+test("runtime watchdog disconnect preserves restart intent but explicit disconnect cancels it", () => {
+  const f = fixture();
+  try {
+    expect(f.invoke("restoreNativeRoute()").status).toBe(0);
+    expect(readFileSync(f.configPath, "utf8")).toBe(f.original);
+    expect(JSON.parse(readFileSync(f.journalPath, "utf8")).reconnectOnStartup).toBe(true);
+    // Startup reactivation is allowed only after a runtime-recovery disconnect.
+    expect(activateCodexIntegration({ recoveryOnly: true })).toEqual({ changed: true, active: true });
+    deactivateCodexIntegration();
+    const disconnected = JSON.parse(readFileSync(f.journalPath, "utf8"));
+    expect(disconnected.active).toBe(false);
+    expect(disconnected.reconnectOnStartup).toBeUndefined();
+    expect(activateCodexIntegration({ recoveryOnly: true })).toEqual({ changed: false, active: false });
+    expect(readFileSync(f.configPath, "utf8")).toBe(f.original);
+  } finally { f.close(); }
+});
 
 test("missing listener restores the journal route and corrupt primary journal recovers from its mirror", () => {
   const f = fixture();
