@@ -764,7 +764,7 @@ export async function ensureChatGptPersonalizedConnectorAccess(
     );
   } catch (error) {
     if (error instanceof ChatGptPersistentBrowserStateError) throw error;
-    const guidance = " If the connector works in a regular chat, enable Launcher → Settings → Save chats in ChatGPT, finish active tasks, then restart the launcher and Codex. Task chats will be kept in your ChatGPT history.";
+    const guidance = " ChatGPT Web has not exposed a verified Personalized Temporary Chat option or the configured connector. Keep Save chats in ChatGPT off to preserve Temporary Chat privacy. Do not send the request or treat the Plugins sidebar as connector proof. Retry when ChatGPT Web exposes Personalized Temporary Chat with the connector, or explicitly opt into saved chats if you accept conversations appearing in history";
     if (!abortSignal?.aborted && (
       error instanceof ChatGptPersonalizationDeadlineError
       || deadlineController.signal.aborted
